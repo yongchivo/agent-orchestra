@@ -78,8 +78,9 @@ class Worker:
         with (self.workdir / f"{self.name}.txt").open("a", encoding="utf-8") as f:
             f.write(f"work of agent {self.name} on {self.branch}\n")
 
-    async def _run_claude(self):
-        cmd = [
+    def command(self):
+        """Headless CLI invocation. Separate from _run_claude so tests can check the flags."""
+        return [
             "claude", "-p", self.task.prompt,
             "--output-format", "stream-json", "--verbose",
             "--max-turns", str(self.task.max_turns),
@@ -87,8 +88,10 @@ class Worker:
             # dontAsk: anything not in --allowedTools is denied, never prompted.
             "--permission-mode", "dontAsk",
         ]
+
+    async def _run_claude(self):
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(self.workdir),
+            *self.command(), cwd=str(self.workdir),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:

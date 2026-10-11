@@ -113,8 +113,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests drive the `mock` backend against a temporary git repository: a full run with merges,
-rejection of invalid task names and of duplicate names.
+The tests drive the `mock` backend against a temporary git repository and back every claim in
+the security section: full runs with merges, per-agent isolation of commits, a merge conflict
+attributed to one agent and aborted cleanly, rejection of invalid and duplicate task names, the
+least-privilege CLI flags, the dashboard's HTML escaping against an XSS payload (needs `node`),
+the local-only bind of the dashboard server, and the stdlib-only runtime.
 
 ## Limitations
 
