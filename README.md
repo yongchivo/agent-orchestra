@@ -65,9 +65,14 @@ project-specific focus: Firestore/Storage rules, mobile permissions, containers)
 `firebase.json`, `google-services.json`; lockfiles; for Flutter `android/**`, `ios/**` and
 `pubspec.yaml`): a change to one of them always ends in `needs_review`, even inside a role's
 paths, on top of the global protected list. It warns about `*.log` files git does not ignore
-and about Firebase app configuration files, and for `CLAUDE.md`, `AGENTS.md` and any `.md` whose
-name contains "claude", "agent", "prompt" or "scaffold" it asks whether to use the file as
-project context. The roles it writes are recorded as confirmed by you
+and about Firebase app configuration files. The project context it writes is a short summary
+(languages, stack, layout, dependencies, tests) you can edit in the UI. For `CLAUDE.md`,
+`AGENTS.md` and any `.md` whose name contains "claude", "agent", "prompt" or "scaffold" it asks
+whether to **reference** the file by path (one line, `Read <file> when you need: <its title>`;
+agents have `Read`), **embed** it or skip it; the default is to reference anything that would not
+fit in the 4000-character context. An embedded document that does not fit is cut at the last
+markdown heading that does, the context says how many characters were left out, and `uno init`
+and the Roles & project panel both report it. The roles it writes are recorded as confirmed by you
 (the same fingerprint the UI uses, in `~/.uno-orchestra/trust.json`). Running it again does
 nothing; `uno init --force` regenerates the proposed roles after asking (roles you added are kept).
 In a folder that is not a repository it offers `git init` plus an initial commit.

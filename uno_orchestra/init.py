@@ -59,6 +59,8 @@ TEST_GLOBS = {"Python": ["**/test_*.py", "**/*_test.py", "**/conftest.py"],
               "Kotlin": ["src/test/**"], "Ruby": ["spec/**", "test/**"], "PHP": ["tests/**"], "C#": ["**/*Tests/**"],
               "Swift": ["Tests/**"]}
 MAX_FILES = 50_000
+MIN_SHELL_FILES = 3      # Shell is part of the stack only with this many .sh files outside scripts/
+MAX_TITLE = 120
 GITIGNORE_BLOCK = ["# Uno: run state (the roles in .uno/ are meant to be committed)", "events.jsonl", "events.jsonl.1"]
 
 
@@ -101,6 +103,7 @@ def analyze(repo):
     top, managers, frameworks, services = _top_level(repo)
     skip_top = {d for fw in frameworks for d in PLATFORM_DIRS.get(fw, ())}
     counts, files, test_files = collections.Counter(), 0, 0
+    in_scripts = collections.Counter()   # files per language under the top-level scripts/
     logs, instructions, firebase_config = [], [], []
     for root, dirs, names in os.walk(repo):
         rel = Path(root).relative_to(repo)
@@ -112,6 +115,8 @@ def analyze(repo):
             lang = LANGUAGES.get(Path(name).suffix.lower())
             if lang:
                 counts[lang] += 1
+                if rel.parts[:1] == ("scripts",):
+                    in_scripts[lang] += 1
             if lang and lang not in DOC_LANGUAGES and _is_test(rel, name):
                 test_files += 1
             low = name.lower()
@@ -126,7 +131,8 @@ def analyze(repo):
     for d in skip_top:   # platform dirs are not counted, but their Firebase config files matter
         for name in FIREBASE_CONFIG:
             firebase_config += [str(p.relative_to(repo)) for p in (repo / d).rglob(name)]
-    languages = [lang for lang, _ in counts.most_common() if lang not in DOC_LANGUAGES]
+    languages = [lang for lang, n in counts.most_common() if lang not in DOC_LANGUAGES
+                 and not (lang == "Shell" and n - in_scripts[lang] < MIN_SHELL_FILES)]
     return {
         "languages": languages, "counts": dict(counts), "files": files,
         "dirs": [d for d in TYPICAL_DIRS if (repo / d).is_dir()],
@@ -232,8 +238,28 @@ def propose_roles(analysis):
     ]
 
 
+def doc_title(content):
+    """The first markdown heading, else the first non-empty line: what the document is about."""
+    for line in content.splitlines():
+        if line.startswith("#"):
+            return line.lstrip("#").strip().rstrip(".")[:MAX_TITLE]
+    return next((line.strip().rstrip(".")[:MAX_TITLE] for line in content.splitlines() if line.strip()), "")
+
+
+def _cut_at_section(content, limit):
+    """Cut before `limit` at the last markdown heading, else at the last line break."""
+    head = content[:limit]
+    at = head.rfind("\n#")
+    if at <= 0:
+        at = head.rfind("\n")
+    return head[:at] if at > 0 else head
+
+
 def project_context(analysis, extra_docs=()):
-    """Deterministic context from the analysis, plus the instruction files the user accepted."""
+    """Deterministic short summary from the analysis, plus the instruction files the user chose:
+    referenced by path (`Read X when you need: <title>`) or embedded. Returns (text, truncated):
+    an embedded document that does not fit is cut at a section boundary, a marker says how much
+    was left out, and `truncated` maps the document to the characters omitted."""
     langs = ", ".join(f"{lang} ({analysis['counts'][lang]} files)" for lang in analysis["languages"][:5]) or "none detected"
     lines = [f"Languages: {langs}."]
     if analysis["frameworks"] or analysis["services"]:
@@ -243,9 +269,26 @@ def project_context(analysis, extra_docs=()):
               f"Dependencies: {', '.join(analysis['package_managers']) or 'no manifest found'}.",
               f"Tests: {'yes (' + str(analysis['test_files']) + ' files)' if analysis['has_tests'] else 'none found'}."]
     text = " ".join(lines)
-    for name, content in extra_docs:
-        text += f"\n\nFrom {name}:\n{content}"
-    return text[:MAX_CONTEXT]
+    truncated = {}
+    for name, content, mode in extra_docs:
+        if mode == "reference":
+            text += f"\nRead {name} when you need: {doc_title(content) or 'its contents'}."
+            continue
+        header = f"\n\nFrom {name}:\n"
+        marker = f"\n[... {{n}} characters of {name} omitted: Read {name} for the rest]"
+        room = MAX_CONTEXT - len(text) - len(header)
+        if len(content) <= room:
+            text += header + content
+            continue
+        kept = _cut_at_section(content, max(0, room - len(marker) - 12))
+        omitted = len(content) - len(kept)
+        truncated[name] = omitted
+        if kept:
+            text += header + kept + marker.format(n=omitted)
+        else:
+            text += f"\n[{name} not embedded: no room left ({omitted} characters); Read {name} when you need: {doc_title(content)}]"
+    assert len(text) <= MAX_CONTEXT, len(text)
+    return text, truncated
 
 
 def describe(role):
@@ -361,7 +404,7 @@ def run(path, state_dir, ask=None, say=print, force=False):
             return 1
 
     analysis = analyze(repo)
-    say(f"Detected: {project_context(analysis)}")
+    say(f"Detected: {project_context(analysis)[0]}")
     for w in warnings(repo, analysis):
         say(f"warning: {w}")
     say("Proposed roles:")
@@ -376,12 +419,23 @@ def run(path, state_dir, ask=None, say=print, force=False):
         protected = roles_mod.check_protected_paths(ask("    protected paths (space-separated; empty for none)", " ".join(protected)).split())
     docs = []
     for name in ([n for n in ("CLAUDE.md", "AGENTS.md") if analysis[n[:-3].lower() + "_md"]] + analysis["instruction_files"]):
-        if yes(ask(f"{name} looks like instructions for agents. Use it as project context for the planner and the roles?", "y")):
-            docs.append((name, (repo / name).read_text(encoding="utf-8", errors="replace")))
+        content = (repo / name).read_text(encoding="utf-8", errors="replace")
+        room = MAX_CONTEXT - len(project_context(analysis, docs)[0]) - len(name) - 12
+        fits = len(content) <= room
+        answer = ask(f"{name} looks like instructions for agents ({len(content)} characters"
+                     + ("" if fits else f", more than the {room} left in the project context") + "). "
+                     "[r]eference it by path (agents can Read it), [e]mbed it in the context, or [s]kip?",
+                     "e" if fits else "r").strip().lower()[:1]
+        if answer in ("r", "e"):
+            docs.append((name, content, "reference" if answer == "r" else "embed"))
+    text, truncated = project_context(analysis, docs)
+    for name, n in truncated.items():
+        say(f"warning: {name} did not fit: cut at a section boundary, {n} characters omitted "
+            f"(the context says so; agents can Read the file). Prefer referencing it by path.")
     for role in roles:
         roles_mod.save_role(repo, role)
-    roles_mod.save_project_context(repo, project_context(analysis, docs))
-    roles_mod.save_protected_paths(repo, protected)
+    roles_mod.save_project_context(repo, text)
+    roles_mod.save_protected_paths(repo, protected, truncated)
     roles_mod.trust(repo, state_dir)   # written by the user, through this command: confirmed
     changed = ensure_gitignore(repo)
     say(f"Wrote {roles_mod.DIR}/project.json and {roles_mod.DIR}/roles/{{{','.join(r.name for r in roles)}}}.json"

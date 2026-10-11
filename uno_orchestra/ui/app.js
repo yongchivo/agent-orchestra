@@ -280,7 +280,8 @@
       `${r.name} · ${r.preset} · ${r.output} · paths ${r.paths.join(' ')} — ${r.description} — instructions: ${r.instructions}`)
       .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : []));
     $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
-      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '');
+      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
+      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
   }
   async function loadRoles() {
     const repo = $('repo').value.trim(); if (!repo) return;

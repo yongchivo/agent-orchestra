@@ -146,10 +146,12 @@ def test_init_in_a_folder_without_git_offers_git_init(tmp_path, state_dir):
 def test_init_asks_before_using_claude_md(repo, state_dir):
     (repo / "CLAUDE.md").write_text("Always use tabs.\n")
     commit(repo)
-    assert init.run(repo, state_dir, ask=lambda q, d: "n" if "CLAUDE.md" in q else d, say=lambda s: None) == 0
+    assert init.run(repo, state_dir, ask=lambda q, d: "s" if "CLAUDE.md" in q else d, say=lambda s: None) == 0
     assert "tabs" not in roles_mod.project_context(repo)
-    assert init.run(repo, state_dir, ask=lambda q, d: "y", say=lambda s: None, force=True) == 0
+    assert init.run(repo, state_dir, ask=lambda q, d: "e" if "CLAUDE.md" in q else "y", say=lambda s: None, force=True) == 0
     assert "From CLAUDE.md:\nAlways use tabs." in roles_mod.project_context(repo)
+    assert init.run(repo, state_dir, ask=lambda q, d: "r" if "CLAUDE.md" in q else "y", say=lambda s: None, force=True) == 0
+    assert roles_mod.project_context(repo).endswith("\nRead CLAUDE.md when you need: Always use tabs.")
 
 
 def test_init_lets_the_user_edit_paths_and_remove_roles(repo, state_dir):
@@ -519,16 +521,16 @@ def test_init_writes_protected_paths_and_asks_about_instruction_files(repo, stat
     def ask(q, d):
         asked.append(q)
         if "scaffold" in q:
-            return "y"
+            return "e"
         if "Prompt-notes" in q:
-            return "n"
+            return "s"
         if "protected paths" in q:
             return d + " extra/secret.txt"
         return d
     assert init.run(repo, state_dir, ask=ask, say=said.append) == 0
     assert any("warning:" in s and "firestore-debug.log" in s for s in said)
     assert any("Protected paths of this project" in s for s in said)
-    assert sum("Use it as project context" in q for q in asked) == 2
+    assert sum("[r]eference it by path" in q for q in asked) == 2
     ctx = roles_mod.project_context(repo)
     assert "Stack: Flutter, Firebase." in ctx and "From claude-code-session-scaffold.md:\nNever use .add()" in ctx
     assert "Prompt-notes" not in ctx and "platform directories android, ios, web are generated" in ctx
@@ -604,3 +606,82 @@ def test_init_detects_more_manifests_and_frameworks(repo, state_dir):
     assert {"Kotlin", "TypeScript", "Rust", "PHP", "Ruby", "C#", "Go", "Dart"} <= set(a["counts"])
     assert init.propose_protected(repo, a) == ["pnpm-lock.yaml"]
     assert "Containers:" in {r.name: r for r in init.propose_roles(a)}["security-analyst"].instructions
+
+
+# --- project context: short summary, documents by reference, section-aware truncation ----------
+
+def test_long_documents_are_referenced_or_cut_at_a_section_with_a_warning(repo, state_dir):
+    sections = "".join(f"## Section {i}\n" + ("line of text " * 20 + "\n") * 8 for i in range(1, 30))
+    long = "# Scaffold: schema and rules\nIntro.\n\n" + sections
+    (repo / "agent-notes.md").write_text(long)
+    (repo / "CLAUDE.md").write_text("Short rules.\n")
+    commit(repo)
+    a = init.analyze(repo)
+    assert len(long) > roles_mod.MAX_CONTEXT
+
+    # reference: one line with the document's title, nothing embedded
+    text, truncated = init.project_context(a, [("agent-notes.md", long, "reference")])
+    assert text.endswith("\nRead agent-notes.md when you need: Scaffold: schema and rules.") and truncated == {}
+    assert len(text) < 400                                     # the summary stays short
+
+    # embed: cut at the last section heading that fits, with a marker saying how much is missing
+    text, truncated = init.project_context(a, [("CLAUDE.md", "Short rules.\n", "embed"), ("agent-notes.md", long, "embed")])
+    assert len(text) <= roles_mod.MAX_CONTEXT and "From CLAUDE.md:\nShort rules." in text
+    omitted = truncated["agent-notes.md"]
+    body = text.split("From agent-notes.md:\n", 1)[1]
+    kept, marker = body.rsplit("\n[... ", 1)
+    assert kept == long[:len(kept)] and kept.endswith("line of text ") and long[len(kept):].startswith("\n## Section")
+    assert marker == f"{omitted} characters of agent-notes.md omitted: Read agent-notes.md for the rest]"
+    assert omitted == len(long) - len(kept)
+
+    # through `uno init`: the default for a document that does not fit is to reference it
+    asked, said = [], []
+
+    def ask(q, d):
+        asked.append((q, d))
+        return d
+    assert init.run(repo, state_dir, ask=ask, say=said.append) == 0
+    defaults = {q.split(" looks like")[0]: d for q, d in asked if "looks like instructions" in q}
+    assert defaults == {"CLAUDE.md": "e", "agent-notes.md": "r"}
+    assert "more than the" in next(q for q, _ in asked if q.startswith("agent-notes.md"))
+    ctx = roles_mod.project_context(repo)
+    assert "From CLAUDE.md:\nShort rules." in ctx and ctx.endswith("Read agent-notes.md when you need: Scaffold: schema and rules.")
+    assert roles_mod.project_truncated(repo) == {} if hasattr(roles_mod, "project_truncated") else True
+    assert not any("warning:" in m and "omitted" in m for m in said)
+
+    # forcing the embed: init warns, project.json records it, and the UI view reports it
+    assert init.run(repo, state_dir, ask=lambda q, d: "e" if "looks like" in q else "y", say=said.append, force=True) == 0
+    assert any("agent-notes.md did not fit" in m and "omitted" in m for m in said)
+    files = roles_mod.snapshot(repo)
+    assert roles_mod.project_truncated_from(files) == {"agent-notes.md": omitted}
+    assert f"[... {omitted} characters of agent-notes.md omitted" in roles_mod.project_context_from(files)
+    from uno_orchestra.ui.server import UIServer
+    srv = UIServer("127.0.0.1", 0, "t" * 43, state_dir, [repo.parent], idle_timeout=3600)
+    try:
+        view = srv.roles_view(str(repo))
+    finally:
+        srv.server_close()
+    assert view["truncated"] == {"agent-notes.md": omitted} and view["error"] is None
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    assert "context truncated" in js and "rolesData.truncated" in js
+    with pytest.raises(ValueError, match="truncated"):
+        roles_mod.project_truncated_from({"project.json": b'{"context": "", "truncated": {"a": "lots"}}'})
+
+
+def test_shell_is_not_part_of_the_stack_when_marginal(repo, state_dir):
+    (repo / "scripts").mkdir()
+    for i in range(4):
+        (repo / "scripts" / f"s{i}.sh").write_text("#!/bin/sh\n")
+    (repo / "app.py").write_text("x = 1\n")
+    commit(repo)
+    a = init.analyze(repo)
+    assert a["counts"]["Shell"] == 4 and a["languages"] == ["Python"]          # all under scripts/
+    (repo / "run.sh").write_text("#!/bin/sh\n")
+    (repo / "build.sh").write_text("#!/bin/sh\n")
+    assert init.analyze(repo)["languages"] == ["Python"]                      # only 2 outside scripts/: marginal
+    (repo / "deploy.sh").write_text("#!/bin/sh\n")
+    assert init.analyze(repo)["languages"] == ["Shell", "Python"]              # 3 outside scripts/: part of the stack
+    import shutil
+    shutil.rmtree(repo / "scripts")
+    (repo / "deploy.sh").unlink()
+    assert init.analyze(repo)["counts"]["Shell"] == 2 and init.analyze(repo)["languages"] == ["Python"]   # under the threshold

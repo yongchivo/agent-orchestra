@@ -160,6 +160,15 @@ def project_protected_from(files):
     return check_protected_paths(_project_from(files).get("protected_paths", []))
 
 
+def project_truncated_from(files):
+    """{document: characters omitted} when `uno init` had to cut an embedded document."""
+    data = _project_from(files).get("truncated", {})
+    if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v > 0
+                                             for k, v in data.items()):
+        raise ValueError(f"{DIR}/project.json: 'truncated' must map document names to character counts")
+    return {k[:300]: v for k, v in list(data.items())[:MAX_PROTECTED]}
+
+
 def project_context(repo):
     return project_context_from(snapshot(repo))
 
@@ -190,8 +199,8 @@ def save_project_context(repo, text):
     _save_project(repo, context=text)
 
 
-def save_protected_paths(repo, paths):
-    _save_project(repo, protected_paths=check_protected_paths(paths))
+def save_protected_paths(repo, paths, truncated=None):
+    _save_project(repo, protected_paths=check_protected_paths(paths), truncated=dict(truncated or {}))
 
 
 FINDINGS_FORMAT = ('JSON only: {"findings": [{"severity": "low|medium|high", "file": "path", '
