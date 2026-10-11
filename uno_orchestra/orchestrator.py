@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import scope, state, worktree
+from . import roles as roles_mod, scope, state, worktree
 from .bus import EventBus
 from .worker import Task, Worker, write_agent_config
 
@@ -33,6 +33,7 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
     branch = worktree.preflight(repo)
     base = worktree.head(repo)
     steering = worktree.agent_instruction_files(repo)
+    protected = roles_mod.project_protected(repo)   # only adds restrictions: no trust needed
     if steering:
         # Only --bare (API-key auth) keeps these out of the model's context. See README.
         msg = ("the repository contains agent instruction files that may reach the model: "
@@ -73,7 +74,8 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
                 summary[w.name] = "failed"
                 continue
             verdict, detail = scope.check(worktree.changes(repo, base, w.branch), w.task.paths,
-                                          read=lambda path, b=w.branch: worktree.show(repo, b, path))
+                                          read=lambda path, b=w.branch: worktree.show(repo, b, path),
+                                          protected=protected)
             if verdict != "ok":
                 summary[w.name] = verdict
                 bus.emit("orchestrator", verdict, detail[:300], target=w.name, branch=w.branch)

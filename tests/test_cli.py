@@ -441,3 +441,166 @@ def test_cli_defaults_to_ui_and_has_help_per_subcommand(capsys):
     parser = cli.build_parser()
     assert parser.parse_args(["ui", "--no-browser"]).cmd == "ui"
     assert cli.main.__module__ == "uno_orchestra.cli"
+
+
+# --- detection: Flutter + Firebase ------------------------------------------------------------
+
+def flutter_firebase_layout(repo):
+    (repo / "lib" / "src").mkdir(parents=True)
+    (repo / "lib" / "main.dart").write_text("void main() {}\n")
+    (repo / "lib" / "src" / "app.dart").write_text("class App {}\n")
+    (repo / "test").mkdir()
+    (repo / "test" / "app_test.dart").write_text("void main() {}\n")
+    (repo / "integration_test").mkdir()
+    (repo / "integration_test" / "flow_test.dart").write_text("void main() {}\n")
+    (repo / "firestore-tests").mkdir()
+    (repo / "firestore-tests" / "rules.test.js").write_text("test('x', () => {});\n")
+    (repo / "firestore-tests" / "package.json").write_text("{}\n")
+    for d in ("android/app", "ios/Runner", "web"):
+        (repo / d).mkdir(parents=True)
+    (repo / "android" / "app" / "google-services.json").write_text("{}\n")
+    (repo / "android" / "app" / "build.gradle.kts").write_text("plugins {}\n")
+    (repo / "ios" / "Runner" / "GoogleService-Info.plist").write_text("<plist/>\n")
+    (repo / "ios" / "Runner" / "AppDelegate.swift").write_text("import UIKit\n")
+    (repo / "web" / "index.html").write_text("<html></html>\n")
+    (repo / "pubspec.yaml").write_text("name: app\ndependencies:\n  flutter:\n    sdk: flutter\n")
+    (repo / "pubspec.lock").write_text("packages: {}\n")
+    (repo / "firebase.json").write_text('{"firestore": {"rules": "firestore.rules"}}\n')
+    (repo / "firestore.rules").write_text("rules_version = '2';\n")
+    (repo / "storage.rules").write_text("rules_version = '2';\n")
+    (repo / "firestore.indexes.json").write_text("{}\n")
+    (repo / "claude-code-session-scaffold.md").write_text("Never use .add(); client ids only.\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "Prompt-notes.md").write_text("notes\n")
+    (repo / "docs" / "rules.md").write_text("plain docs\n")
+    (repo / "firestore-debug.log").write_text("log\n")
+    (repo / "build").mkdir()
+    (repo / "build" / "gen.dart").write_text("// generated\n")
+    commit(repo, "flutter")
+
+
+def test_init_detects_flutter_and_firebase_without_platform_dirs(repo, state_dir):
+    flutter_firebase_layout(repo)
+    a = init.analyze(repo)
+    assert a["languages"] == ["Dart", "JavaScript"]                   # Swift (ios/) and build/ are not counted
+    assert a["counts"]["Dart"] == 4 and "Swift" not in a["counts"] and "Kotlin" not in a["counts"]
+    assert a["frameworks"] == ["Flutter"] and a["services"] == ["Firebase"]
+    assert a["package_managers"] == ["pub"] and a["platform_dirs"] == ["android", "ios", "web"]
+    assert a["test_dirs"] == ["firestore-tests", "integration_test", "test"] and a["has_tests"]
+    assert a["instruction_files"] == ["claude-code-session-scaffold.md", "docs/Prompt-notes.md"]
+    assert a["log_files"] == ["firestore-debug.log"]
+    assert a["firebase_config_files"] == ["android/app/google-services.json", "ios/Runner/GoogleService-Info.plist"]
+    roles = {r.name: r for r in init.propose_roles(a)}
+    assert roles["developer"].paths == ["lib/**"]
+    assert roles["tester"].paths == ["firestore-tests/**", "integration_test/**", "test/**", "**/*_test.dart",
+                                     "**/*.test.js", "**/*.spec.js"]
+    sec = roles["security-analyst"]
+    assert sec.preset == "readonly" and sec.paths == ["**"]
+    for needle in ("firestore.rules", "storage.rules", "if true", "across users", "AndroidManifest.xml", "Info.plist"):
+        assert needle in sec.instructions, needle
+    assert roles["architect"].preset == "readonly"
+    assert init.propose_protected(repo, a) == [
+        "firebase.json", "firestore.rules", "storage.rules", "firestore.indexes.json",
+        "android/app/google-services.json", "ios/Runner/GoogleService-Info.plist",
+        "android/**", "ios/**", "pubspec.yaml", "pubspec.lock"]
+    warns = init.warnings(repo, a)
+    assert any(".log file(s) are not ignored by git (firestore-debug.log)" in w for w in warns)
+    assert any("google-services.json" in w and "Firebase project" in w for w in warns)
+    (repo / ".gitignore").write_text("*.log\n")
+    assert any(".log" in w for w in init.warnings(repo, a))          # still tracked: still a problem
+    git(repo, "rm", "-q", "--cached", "firestore-debug.log")
+    assert not any(".log" in w for w in init.warnings(repo, a))      # untracked and ignored: fine
+
+
+def test_init_writes_protected_paths_and_asks_about_instruction_files(repo, state_dir):
+    flutter_firebase_layout(repo)
+    asked, said = [], []
+
+    def ask(q, d):
+        asked.append(q)
+        if "scaffold" in q:
+            return "y"
+        if "Prompt-notes" in q:
+            return "n"
+        if "protected paths" in q:
+            return d + " extra/secret.txt"
+        return d
+    assert init.run(repo, state_dir, ask=ask, say=said.append) == 0
+    assert any("warning:" in s and "firestore-debug.log" in s for s in said)
+    assert any("Protected paths of this project" in s for s in said)
+    assert sum("Use it as project context" in q for q in asked) == 2
+    ctx = roles_mod.project_context(repo)
+    assert "Stack: Flutter, Firebase." in ctx and "From claude-code-session-scaffold.md:\nNever use .add()" in ctx
+    assert "Prompt-notes" not in ctx and "platform directories android, ios, web are generated" in ctx
+    protected = roles_mod.project_protected(repo)
+    assert protected[:3] == ["firebase.json", "firestore.rules", "storage.rules"] and protected[-1] == "extra/secret.txt"
+    assert roles_mod.trusted(repo, state_dir)
+    # the UI's context editor keeps protected_paths
+    roles_mod.save_project_context(repo, "edited in the UI")
+    assert roles_mod.project_protected(repo) == protected and roles_mod.project_context(repo) == "edited in the UI"
+    with pytest.raises(ValueError, match="relative"):
+        roles_mod.save_protected_paths(repo, ["/etc/**"])
+
+
+def test_project_protected_paths_need_review_even_inside_task_paths(repo, state_dir, tmp_path):
+    flutter_firebase_layout(repo)
+    assert init.run(repo, state_dir, ask=accept_all, say=lambda s: None) == 0
+    commit(repo, "roles")
+    git(repo, "checkout", "-q", "-b", "work")
+    protected = roles_mod.project_protected(repo)
+    change = lambda path: [{"path": path, "status": "M", "mode": "100644", "size": 10, "binary": False}]  # noqa: E731
+    assert scope.check(change("firestore.rules"), ["**"], protected=protected) == \
+        ("needs_review", "manual review required: firestore.rules (protected)")
+    assert scope.check(change("android/app/src/main/AndroidManifest.xml"), ["**"], protected=protected)[0] == "needs_review"
+    assert scope.check(change("lib/main.dart"), ["**"], protected=protected) == ("ok", "")
+    assert scope.check(change("firestore.rules"), ["**"]) == ("ok", "")       # not in the global list
+
+    # end to end: a mock agent edits firestore.rules inside its paths -> gate blocks the merge
+    from uno_orchestra import orchestrator
+    from uno_orchestra.bus import EventBus
+    from uno_orchestra.worker import Task, Worker
+    original = Worker._run_mock
+
+    async def tamper(self):
+        (self.workdir / "firestore.rules").write_text("allow read, write: if true;\n")
+        (self.workdir / "lib" / "main.dart").write_text("void main() { print(1); }\n")
+    Worker._run_mock = tamper
+    try:
+        import asyncio
+        summary = asyncio.run(orchestrator.run(repo, [Task("dev", "edit", ["**"])], EventBus(tmp_path / "e.jsonl"),
+                                               backend="mock", state_dir=tmp_path / "s"))
+    finally:
+        Worker._run_mock = original
+    assert summary == {"dev": "needs_review"}
+    assert git(repo, "log", "--oneline").count("\n") == 3 and (repo / "firestore.rules").read_text() == "rules_version = '2';\n"
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    assert any(e["kind"] == "needs_review" and "firestore.rules (protected)" in e["message"] for e in events)
+
+
+def test_init_detects_more_manifests_and_frameworks(repo, state_dir):
+    (repo / "package.json").write_text('{"dependencies": {"next": "14", "react": "18"}}\n')
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
+    (repo / "Cargo.toml").write_text("[package]\nname='x'\n")
+    (repo / "go.mod").write_text("module x\n")
+    (repo / "Gemfile").write_text("gem 'rails'\n")
+    (repo / "composer.json").write_text("{}\n")
+    (repo / "App.csproj").write_text("<Project/>\n")
+    (repo / "build.gradle.kts").write_text("plugins { id(\"org.springframework.boot\") }\n")
+    (repo / "Podfile").write_text("platform :ios\n")
+    (repo / "manage.py").write_text("# django\n")
+    (repo / "Dockerfile").write_text("FROM scratch\n")
+    (repo / "a.kts").write_text("")
+    (repo / "b.ts").write_text("")
+    (repo / "c.rs").write_text("")
+    (repo / "d.php").write_text("")
+    (repo / "e.rb").write_text("")
+    (repo / "f.cs").write_text("")
+    (repo / "g.go").write_text("")
+    (repo / "h.dart").write_text("")
+    commit(repo)
+    a = init.analyze(repo)
+    assert a["package_managers"] == ["npm", "pnpm", "cargo", "go modules", "bundler", "gradle", "composer", "cocoapods", "dotnet"]
+    assert a["frameworks"] == ["Next.js", "React", "Django", "Rails", "Spring"] and a["services"] == ["Docker"]
+    assert {"Kotlin", "TypeScript", "Rust", "PHP", "Ruby", "C#", "Go", "Dart"} <= set(a["counts"])
+    assert init.propose_protected(repo, a) == ["pnpm-lock.yaml"]
+    assert "Containers:" in {r.name: r for r in init.propose_roles(a)}["security-analyst"].instructions

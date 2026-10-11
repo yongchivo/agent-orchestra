@@ -22,6 +22,7 @@ ROLE_FIELDS = {"name", "description", "instructions", "preset", "paths", "output
 MAX_TEXT = {"description": 300, "instructions": 4000, "output_format": 1000}
 MAX_PATHS = 20
 MAX_CONTEXT = 4000
+MAX_PROTECTED = 50
 
 
 @dataclass
@@ -123,29 +124,74 @@ def delete_role(repo, name):
     path.unlink()
 
 
-def project_context_from(files):
+def _project_from(files):
     data = files.get("project.json")
     if data is None:
-        return ""
+        return {}
     try:
-        ctx = json.loads(data.decode("utf-8")).get("context", "")
-    except (ValueError, AttributeError, UnicodeDecodeError) as exc:
+        obj = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
         raise ValueError(f"{DIR}/project.json: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError(f"{DIR}/project.json: must be a JSON object")
+    return obj
+
+
+def project_context_from(files):
+    ctx = _project_from(files).get("context", "")
     if not isinstance(ctx, str):
         raise ValueError(f"{DIR}/project.json: 'context' must be a string")
     return ctx[:MAX_CONTEXT]
+
+
+def check_protected_paths(paths):
+    """Globs of this project's files that always need review, on top of scope.PROTECTED.
+    They can only add restrictions, so they are read even before the user confirms .uno/."""
+    if (not isinstance(paths, list) or len(paths) > MAX_PROTECTED
+            or not all(isinstance(p, str) and p.strip() and len(p) <= 300 for p in paths)):
+        raise ValueError(f"protected_paths must be a list of at most {MAX_PROTECTED} globs")
+    for p in paths:
+        if p.startswith("/") or ".." in p.split("/"):
+            raise ValueError(f"protected path {p!r} must be relative and without '..'")
+    return list(dict.fromkeys(p.strip() for p in paths))
+
+
+def project_protected_from(files):
+    return check_protected_paths(_project_from(files).get("protected_paths", []))
 
 
 def project_context(repo):
     return project_context_from(snapshot(repo))
 
 
+def project_protected(repo):
+    try:
+        return project_protected_from(snapshot(repo))
+    except ValueError:
+        return []   # a broken file protects nothing extra; load_confirmed() reports it
+
+
+def _save_project(repo, **fields):
+    """Update project.json field by field: the UI's context editor never drops protected_paths."""
+    d = Path(repo) / DIR
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "project.json"
+    try:
+        data = _project_from({"project.json": path.read_bytes()}) if path.is_file() else {}
+    except ValueError:
+        data = {}
+    data.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 def save_project_context(repo, text):
     if not isinstance(text, str) or len(text) > MAX_CONTEXT:
         raise ValueError(f"project context must be a string of at most {MAX_CONTEXT} characters")
-    d = Path(repo) / DIR
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "project.json").write_text(json.dumps({"context": text}, indent=2) + "\n", encoding="utf-8")
+    _save_project(repo, context=text)
+
+
+def save_protected_paths(repo, paths):
+    _save_project(repo, protected_paths=check_protected_paths(paths))
 
 
 FINDINGS_FORMAT = ('JSON only: {"findings": [{"severity": "low|medium|high", "file": "path", '
@@ -253,6 +299,7 @@ def load_confirmed(repo, state_dir):
     files = snapshot(repo)
     if not trusted(repo, state_dir, files):
         raise ValueError(UNCONFIRMED)
+    project_protected_from(files)   # validated here so a broken list is an error, not silence
     return roles_from(files), project_context_from(files), fingerprint_of(files)
 
 

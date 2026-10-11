@@ -370,6 +370,7 @@ class Pipeline:
         self.error = None
         self.workers = {}
         self.handoffs = []
+        self.protected = []            # the project's own protected globs, read when the run starts
 
     # -- controls (thread-safe through call_soon_threadsafe)
     def pause(self):
@@ -407,6 +408,7 @@ class Pipeline:
         branch = worktree.preflight(self.repo)
         self.base = self.base or worktree.head(self.repo)
         self.run_id = uuid.uuid4().hex[:6]
+        self.protected = roles_mod.project_protected(self.repo)
         run_dir = self.state_dir / "worktrees" / self.run_id
         for d in (self.state_dir, self.state_dir / "worktrees", run_dir):
             _mkdir_private(d)
@@ -497,7 +499,8 @@ class Pipeline:
             self.bus.emit("orchestrator", "needs_review", s.detail[:300], target=s.id, branch=s.branch)
             return
         verdict, detail = scope.check(changes, s.paths,
-                                      read=lambda p, b=s.branch: worktree.show(self.repo, b, p))
+                                      read=lambda p, b=s.branch: worktree.show(self.repo, b, p),
+                                      protected=self.protected)
         if verdict != "ok":
             s.status, s.detail = "blocked", detail
             self.bus.emit("orchestrator", verdict, detail[:300], target=s.id, branch=s.branch)

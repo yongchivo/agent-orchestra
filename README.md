@@ -49,12 +49,25 @@ uno             # opens the control page with this project selected (same as `un
 ```
 
 `uno init` never calls a model and never writes outside `.uno/` and `.gitignore`. It detects
-languages by extension, the usual directories (`src`, `app`, `lib`, `tests`, `docs`,
-`.github`), the dependency manager, whether there are tests, and `README`/`CLAUDE.md`/`AGENTS.md`,
-then proposes four roles with paths and presets that follow what it found: `developer` (edit,
-the source directories), `tester` (edit, the test directories and test-file globs),
-`security-analyst` and `architect` (read-only, JSON findings). If `CLAUDE.md` exists it asks
-whether to use it as project context. The roles it writes are recorded as confirmed by you
+languages by extension (Python, JavaScript/TypeScript, Dart, Go, Rust, Java/Kotlin, Ruby, PHP,
+C#, Swift, ...), the usual directories (`src`, `app`, `lib`, `tests`, `docs`, `.github`), the
+dependency managers by manifest (`pubspec.yaml`, `package.json`, `pyproject.toml`,
+`build.gradle(.kts)`, `Podfile`, `Cargo.toml`, `go.mod`, `composer.json`, `Gemfile`, `*.csproj`, ...),
+frameworks by structure (Flutter, React/Next.js, Vue, Angular, Django, Flask, FastAPI, Rails,
+Laravel, Spring) and services (Firebase, Supabase, Docker, Terraform), whether there are tests,
+and `README`/`CLAUDE.md`/`AGENTS.md`. Dependency, build and (for Flutter) generated platform
+directories (`ios/`, `android/`, ...) are not counted. It then proposes four roles with paths
+and presets that follow what it found: `developer` (edit, the source directories), `tester`
+(edit, the test directories and test-file globs), `security-analyst` (read-only, with a
+project-specific focus: Firestore/Storage rules, mobile permissions, containers) and
+`architect` (read-only, JSON findings). It also proposes **project protected paths** written to
+`.uno/project.json` as `protected_paths` (service rules and config such as `firestore.rules`,
+`firebase.json`, `google-services.json`; lockfiles; for Flutter `android/**`, `ios/**` and
+`pubspec.yaml`): a change to one of them always ends in `needs_review`, even inside a role's
+paths, on top of the global protected list. It warns about `*.log` files git does not ignore
+and about Firebase app configuration files, and for `CLAUDE.md`, `AGENTS.md` and any `.md` whose
+name contains "claude", "agent", "prompt" or "scaffold" it asks whether to use the file as
+project context. The roles it writes are recorded as confirmed by you
 (the same fingerprint the UI uses, in `~/.uno-orchestra/trust.json`). Running it again does
 nothing; `uno init --force` regenerates the proposed roles after asking (roles you added are kept).
 In a folder that is not a repository it offers `git init` plus an initial commit.
