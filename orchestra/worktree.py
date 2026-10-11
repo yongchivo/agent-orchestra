@@ -100,3 +100,7 @@ def merge(repo, branch):
 def remove(repo, path):
     git(repo, "worktree", "remove", "--force", str(path), check=False)
     git(repo, "worktree", "prune", check=False)
+
+
+def delete_branch(repo, branch):
+    git(repo, "branch", "-D", branch, check=False)

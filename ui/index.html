@@ -55,6 +55,77 @@
     </div>
   </section>
 
+  <section id="pipeline" class="panel">
+    <h2>Pipeline <span id="pipeState" class="hint">idle</span></h2>
+    <p class="hint">Talk to the orchestrator: it proposes a plan of role steps (validated by the server), you approve it, the roles hand their work to each other, and nothing reaches your branch until you merge. Uses the repository, backend and parallel fields above.</p>
+    <div class="row">
+      <label>max correction rounds <input id="iters" type="number" min="1" max="5" value="2"></label>
+      <span class="hint">reviewers' medium/high findings go back to the developer at most this many times; then the orchestrator asks you</span>
+    </div>
+    <div id="chat"></div>
+    <div class="row">
+      <input id="chatInput" class="grow" placeholder="Add a function that validates e-mail addresses in utils.py, then have it reviewed" autocomplete="off">
+      <button id="chatSend" type="button">Send</button>
+    </div>
+    <div class="row actions">
+      <button id="pApprove" type="button" disabled>Approve plan</button>
+      <button id="pPause" type="button" class="ghost" disabled>Pause</button>
+      <button id="pResume" type="button" class="ghost" disabled>Resume</button>
+      <button id="pCancel" type="button" class="ghost" disabled>Cancel</button>
+      <span id="pipeInfo" class="hint"></span>
+    </div>
+    <table id="planTable" hidden>
+      <thead><tr><th>#</th><th>step</th><th>role</th><th>goal</th><th>paths</th><th>after</th><th>status</th><th>round</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="pipeReview" hidden>
+      <h3>Review before merging</h3>
+      <p class="reminder">Consolidated diff of the integration branch. Merge puts it on your branch; nothing happens without this click.</p>
+      <ul id="pendingFindings" class="warnings"></ul>
+      <div id="pipeDiff"></div>
+      <pre id="pipeCmds"></pre>
+      <div class="row actions">
+        <button id="pMerge" type="button">Merge into my branch</button>
+        <button id="pDiscard" type="button" class="ghost">Close session (keep branch)</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="rolesPanel" class="panel">
+    <h2>Roles &amp; project <span id="rolesState" class="hint"></span></h2>
+    <p class="hint">Stored in <code>.orchestra/</code> of the repository above (agents can read it, never change it). Roles must be committed before a run.</p>
+    <div class="row">
+      <label>role <select id="roleList"></select></label>
+      <button id="roleNew" type="button" class="ghost">+ new role</button>
+      <button id="roleTemplates" type="button" class="ghost">Install templates (developer, security-analyst, architect)</button>
+      <button id="orchestraCommit" type="button" class="ghost" hidden>Commit .orchestra/</button>
+    </div>
+    <ul id="rolesErrors" class="errors"></ul>
+    <div id="rolesTrust" class="trust" hidden>
+      <p class="reminder">These roles and this project context were not created from this UI, or changed since you confirmed them. Their instructions reach the model. Review them below (select each role), then confirm. Runs on this repository are blocked until you do.</p>
+      <ul id="rolesPreview" class="warnings"></ul>
+      <button id="roleTrust" type="button">I reviewed them: confirm roles</button>
+    </div>
+    <div class="task" id="roleForm">
+      <div class="row">
+        <label>name <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>
+        <label>preset <select id="r-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select></label>
+        <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
+        <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
+      </div>
+      <label>description <input id="r-desc" autocomplete="off"></label>
+      <label>instructions <textarea id="r-instr" rows="4"></textarea></label>
+      <label>expected output format <textarea id="r-format" rows="2"></textarea></label>
+      <label>default paths <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
+      <div class="row actions">
+        <button id="roleSave" type="button">Save role</button>
+        <button id="roleDelete" type="button" class="ghost">Delete</button>
+      </div>
+    </div>
+    <label>project context (shared with every role) <textarea id="projectCtx" rows="3" placeholder="What this project is, its conventions, what reviewers should care about."></textarea></label>
+    <div class="row actions"><button id="projectSave" type="button" class="ghost">Save project context</button></div>
+  </section>
+
   <section id="live" class="panel" hidden>
     <h2>Run <span id="liveTitle" class="hint"></span></h2>
     <div id="agents"></div>

@@ -413,9 +413,13 @@ def test_get_and_head_never_modify_state(ui, repo):
     before = _fingerprint(ui)
 
     action_paths = ["/api/start", "/api/stop", "/api/branch", "/api/check", "/api/templates",
-                    f"/api/start?repo={repo}", f"/api/branch?repo={repo}&name=evil"]
+                    f"/api/start?repo={repo}", f"/api/branch?repo={repo}&name=evil",
+                    "/api/chat", f"/api/chat?repo={repo}&message=hi", "/api/pipeline/approve",
+                    "/api/pipeline/merge", "/api/pipeline/cancel", "/api/roles/delete",
+                    f"/api/roles/templates?repo={repo}", f"/api/roles/commit?repo={repo}", "/api/project"]
     read_paths = ["/", "/app.js", "/style.css", "/api/status", "/api/results", "/api/templates",
-                  "/api/templates/seed", "/api/templates/missing", "/api/events?from=0"]
+                  "/api/templates/seed", "/api/templates/missing", "/api/events?from=0",
+                  "/api/pipeline", f"/api/roles?repo={repo}", "/api/roles?repo=/"]
     for method in ("GET", "HEAD"):
         for path in action_paths:
             status = call(ui, method, path)[0]
@@ -423,6 +427,7 @@ def test_get_and_head_never_modify_state(ui, repo):
             assert status == (200 if path == "/api/templates" else 404), (method, path, status)
         for path in read_paths:
             assert call(ui, method, path)[0] in (200, 400, 404), (method, path)
+    assert not (repo / ".orchestra").exists()
 
     assert _fingerprint(ui) == before
     assert ui.run is None and not ui.running()

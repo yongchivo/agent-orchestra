@@ -76,3 +76,22 @@ pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; 
 pre.diff .add { color: var(--green); } pre.diff .del { color: var(--red); } pre.diff .meta { color: var(--dim); }
 
 @media (max-width: 700px) { .msg { grid-template-columns: 70px 1fr; } .msg .txt { grid-column: 1 / -1; } }
+
+/* pipeline chat */
+#chat { max-height: 40vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--bg); min-height: 60px; }
+.chat-msg { margin: 4px 0; white-space: pre-wrap; line-height: 1.45; }
+.chat-msg .who { font-weight: 700; margin-right: 8px; }
+.chat-msg.you .who { color: var(--accent); } .chat-msg.orchestrator .who { color: var(--blue); }
+#planTable { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+#planTable th, #planTable td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#planTable th { color: var(--dim); font-weight: 400; }
+#planTable td.st-done { color: var(--green); } #planTable td.st-running { color: var(--blue); }
+#planTable td.st-blocked, #planTable td.st-failed, #planTable td.st-conflict { color: var(--red); }
+#pipeReview h3 { font-size: 13px; margin: 12px 0 4px; }
+#pMerge { background: var(--green); border-color: var(--green); }
+.msg.kind-handoff .txt, .msg.kind-iteration .txt { color: var(--blue); }
+.msg.kind-question .txt { color: var(--yellow); }
+.node.blocked { border-color: var(--yellow); }
+code { color: var(--text); }
+.trust { border: 1px solid var(--yellow); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.trust .reminder { margin-top: 0; }

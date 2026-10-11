@@ -7,7 +7,7 @@ import re
 from .bus import SECRET_RE
 
 # Never merged automatically, even when a task's "paths" cover them.
-PROTECTED = [".github/", ".claude/", "CLAUDE.md", ".git*", ".gitattributes", ".gitmodules",
+PROTECTED = [".github/", ".claude/", ".orchestra/", "CLAUDE.md", ".git*", ".gitattributes", ".gitmodules",
              "Makefile", "*.sh", "setup.py", "pyproject.toml", "package.json",
              "requirements*.txt", "Dockerfile"]
 MAX_NEW_BINARY_BYTES = 1 << 20
