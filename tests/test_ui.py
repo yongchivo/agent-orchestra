@@ -384,3 +384,48 @@ def test_every_error_response_carries_security_headers(ui):
         assert h["X-Frame-Options"] == "DENY" and h["Cache-Control"] == "no-store"
         seen.add(status)
     assert {401, 403, 404, 413, 415, 501} <= seen
+
+
+def test_forged_origin_is_rejected_on_get_and_head_too(ui):
+    for method in ("GET", "HEAD"):
+        for path, token in (("/", None), ("/api/status", TOKEN), ("/api/events?from=0", TOKEN)):
+            for origin in ("http://evil.example", "null", f"http://127.0.0.1:{ui.server_port + 1}",
+                           f"https://127.0.0.1:{ui.server_port}"):
+                status = call(ui, method, path, token=token, headers={"Origin": origin})[0]
+                assert status == 403, (method, path, origin, status)
+        # The genuine origin still works.
+        assert call(ui, method, "/api/status", headers={"Origin": f"http://127.0.0.1:{ui.server_port}"})[0] == 200
+
+
+def _fingerprint(ui):
+    files = {}
+    for p in sorted(ui.state_dir.rglob("*")):
+        st = p.lstat()
+        files[str(p)] = (st.st_mode, st.st_size, p.read_bytes() if p.is_file() else None)
+    return files, ui.run, ui.recent_repos(), ui.templates()
+
+
+def test_get_and_head_never_modify_state(ui, repo):
+    # Seed some state through the legitimate POST paths first.
+    assert call(ui, "POST", "/api/templates", {"name": "seed", **form(repo, "a")})[0] == 200
+    head_before = git(repo, "rev-parse", "HEAD")
+    branches_before = git(repo, "branch", "--list")
+    before = _fingerprint(ui)
+
+    action_paths = ["/api/start", "/api/stop", "/api/branch", "/api/check", "/api/templates",
+                    f"/api/start?repo={repo}", f"/api/branch?repo={repo}&name=evil"]
+    read_paths = ["/", "/app.js", "/style.css", "/api/status", "/api/results", "/api/templates",
+                  "/api/templates/seed", "/api/templates/missing", "/api/events?from=0"]
+    for method in ("GET", "HEAD"):
+        for path in action_paths:
+            status = call(ui, method, path)[0]
+            # /api/templates is a legitimate read (list); every other action is unknown to GET/HEAD.
+            assert status == (200 if path == "/api/templates" else 404), (method, path, status)
+        for path in read_paths:
+            assert call(ui, method, path)[0] in (200, 400, 404), (method, path)
+
+    assert _fingerprint(ui) == before
+    assert ui.run is None and not ui.running()
+    assert git(repo, "rev-parse", "HEAD") == head_before
+    assert git(repo, "branch", "--list") == branches_before
+    assert git(repo, "status", "--porcelain") == ""

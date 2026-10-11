@@ -36,6 +36,8 @@ check "GET /api/events without token -> 401"        401 "$(code "$BASE/api/event
 check "POST with forged Origin -> 403"              403 "$(code -X POST -H "X-Orchestra-Token: $TOKEN" -H "Origin: http://evil.example" -H "Content-Type: application/json" -d '{}' "$BASE/api/check")"
 check "POST with correct Origin -> 200"             200 "$(code -X POST -H "X-Orchestra-Token: $TOKEN" -H "Origin: $ORIGIN" -H "Content-Type: application/json" -d '{}' "$BASE/api/check")"
 check "GET with forged Host -> 403"                 403 "$(code -H "Host: evil.example" "$BASE/")"
+check "GET with forged Origin -> 403"               403 "$(code -H "X-Orchestra-Token: $TOKEN" -H "Origin: http://evil.example" "$BASE/api/status")"
+check "HEAD with forged Origin -> 403"              403 "$(code -I -H "X-Orchestra-Token: $TOKEN" -H "Origin: http://evil.example" "$BASE/api/status")"
 check "POST non-JSON Content-Type -> 415"           415 "$(code -X POST -H "X-Orchestra-Token: $TOKEN" -H "Origin: $ORIGIN" -H "Content-Type: text/plain" -d '{}' "$BASE/api/check")"
 check "HEAD / -> 200"                               200 "$(code -I "$BASE/")"
 check "HEAD /api/status with token -> 200"          200 "$(code -I -H "X-Orchestra-Token: $TOKEN" "$BASE/api/status")"
@@ -48,6 +50,20 @@ check "security headers on 404 error"               ok  "$(headers_present "$BAS
 check "security headers on 501 error (PUT)"         ok  "$(headers_present -X PUT "$BASE/api/status")"
 check "CSP forbids inline script"                   1   "$(curl -s -D - -o /dev/null "$BASE/" | grep -ci "script-src 'self'")"
 check "unlisted file is not served -> 404"          404 "$(code "$BASE/server.py")"
+
+# GET/HEAD must never modify state: fingerprint the state dir, sweep every endpoint, compare.
+fingerprint() { find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l 2>/dev/null | md5 2>/dev/null || find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l | md5sum; }
+BEFORE="$(fingerprint)"
+for m in GET HEAD; do
+  for p in /api/start /api/stop /api/branch /api/check "/api/start?repo=/tmp/x" "/api/branch?repo=/tmp/x&name=evil"; do
+    if [ "$m" = HEAD ]; then c="$(code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; else c="$(code -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; fi
+    check "$m $p is not an action -> 404" 404 "$c"
+  done
+  for p in / /app.js /style.css /api/status /api/results /api/templates "/api/events?from=0"; do
+    if [ "$m" = HEAD ]; then code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; else curl -s -m 3 -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; fi
+  done
+done
+check "state dir unchanged after GET/HEAD sweep"    "$BEFORE" "$(fingerprint)"
 check "token file is 0600"                          600 "$(stat -f '%Lp' "$STATE_DIR/token" 2>/dev/null || stat -c '%a' "$STATE_DIR/token")"
 
 echo
