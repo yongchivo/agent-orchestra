@@ -354,7 +354,7 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        if body is not None:
+        if body is not None and self.command != "HEAD":  # HEAD: same headers, no body
             self.wfile.write(body)
 
     def _json(self, status, obj):
@@ -363,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json(status, {"error": message})
 
+    def send_error(self, code, message=None, explain=None):
+        """Route the base class's own errors (501, malformed requests...) through _send,
+        so every response carries the security headers."""
+        self._json(code, {"error": message or self.responses.get(code, ("error",))[0]})
+
     # -- gates applied to every request
     def _origin_ok(self):
         port = self.server.server_port
@@ -370,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         origin = self.headers.get("Origin")
         if origin is None:
-            return self.command == "GET"  # browsers always send Origin on fetch POST
+            return self.command in ("GET", "HEAD")  # browsers always send Origin on fetch POST
         return origin in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
     def _token_ok(self):
@@ -422,6 +427,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc))
         self._error(404, "not found")
 
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_POST(self):
         path = urlsplit(self.path).path
         if not self._gate(path):
@@ -467,6 +475,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             pos = 0
         self._send(200, "application/x-ndjson")
+        if self.command == "HEAD":
+            return
         try:
             while True:
                 if srv.events_path.exists():

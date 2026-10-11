@@ -337,3 +337,50 @@ def test_stop_cancels_the_run_and_cleans_up(ui, repo, monkeypatch):
     assert git(repo, "worktree", "list").count("\n") == 1
     assert not list((ui.state_dir / "worktrees").iterdir())
     assert call(ui, "POST", "/api/stop", {})[0] == 409
+
+
+SECURITY_HEADERS = ("Content-Security-Policy", "X-Frame-Options", "Referrer-Policy",
+                    "X-Content-Type-Options", "Cache-Control")
+
+
+def test_head_matches_get_without_a_body(ui):
+    for path, token in (("/", None), ("/api/status", TOKEN), ("/app.js", None)):
+        gs, gbody, gh = call(ui, "GET", path, token=token)
+        port = ui.server_port
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        h = {"Host": f"127.0.0.1:{port}"}
+        if token:
+            h["X-Orchestra-Token"] = token
+        conn.request("HEAD", path, headers=h)
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        assert gs == r.status == 200
+        assert raw == b""
+        assert r.headers["Content-Length"] == gh["Content-Length"]
+        for name in SECURITY_HEADERS + ("Content-Type",):
+            assert r.headers[name] == gh[name], name
+    assert call(ui, "HEAD", "/api/status", token=None)[0] == 401
+    assert call(ui, "HEAD", "/api/events?from=0")[0] == 200  # headers only, no endless stream
+
+
+def test_every_error_response_carries_security_headers(ui):
+    cases = [
+        ("GET", "/api/status", dict(token=None)),                                   # 401
+        ("POST", "/api/check", dict(body={}, headers={"Origin": "http://evil"})),   # 403
+        ("GET", "/nope", {}),                                                        # 404
+        ("POST", "/api/check", dict(raw=b"x" * (MAX_BODY + 1))),                    # 413
+        ("POST", "/api/check", dict(raw=b"{}", ctype="text/plain")),                # 415
+        ("PUT", "/api/status", dict(raw=b"{}")),                                     # 501 from the base class
+        ("DELETE", "/", {}),                                                         # 501 from the base class
+    ]
+    seen = set()
+    for method, path, kw in cases:
+        status, body, h = call(ui, method, path, **kw)
+        assert status >= 400 and isinstance(body, dict) and "error" in body, (method, path)
+        for name in SECURITY_HEADERS:
+            assert name in h, (method, path, name)
+        assert h["Content-Security-Policy"].startswith("default-src 'none'")
+        assert h["X-Frame-Options"] == "DENY" and h["Cache-Control"] == "no-store"
+        seen.add(status)
+    assert {401, 403, 404, 413, 415, 501} <= seen
