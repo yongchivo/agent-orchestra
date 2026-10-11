@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-orchestra · control</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header id="top">
+  <span class="brand">◆ agent-orchestra</span>
+  <span id="statusText">connecting…</span>
+  <span id="conn">● …</span>
+</header>
+
+<main>
+  <section id="newrun" class="panel">
+    <h2>New run</h2>
+    <div class="row">
+      <label class="grow">repository
+        <input id="repo" list="recent" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
+        <datalist id="recent"></datalist>
+      </label>
+      <label>backend
+        <select id="backend"><option value="mock">mock</option><option value="claude">claude</option></select>
+      </label>
+      <label>parallel <input id="parallel" type="number" min="1" max="8" value="2"></label>
+    </div>
+
+    <div id="tasks"></div>
+    <div class="row">
+      <button id="addTask" type="button" class="ghost">+ task</button>
+      <span class="hint">paths: one or more globs, space-separated (required). Agents never commit; the orchestrator does.</span>
+    </div>
+
+    <div id="checks">
+      <ul id="errors" class="errors"></ul>
+      <ul id="warnings" class="warnings"></ul>
+      <ul id="steering" class="warnings"></ul>
+    </div>
+
+    <div class="row actions">
+      <button id="start" type="button" disabled>Start</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="branch" type="button" class="ghost" hidden>Create branch</button>
+      <span id="runState" class="hint"></span>
+    </div>
+
+    <div class="row templates">
+      <input id="tplName" placeholder="template-name" autocomplete="off" spellcheck="false">
+      <button id="tplSave" type="button" class="ghost">Save template</button>
+      <select id="tplList"></select>
+      <button id="tplLoad" type="button" class="ghost">Load</button>
+    </div>
+  </section>
+
+  <section id="live" class="panel" hidden>
+    <h2>Run <span id="liveTitle" class="hint"></span></h2>
+    <div id="agents"></div>
+    <div id="log"></div>
+  </section>
+
+  <section id="results" class="panel" hidden>
+    <h2>Results <span id="resultsTitle" class="hint"></span></h2>
+    <p class="reminder">Review every diff before you ship it. The gate limits where an agent can write, not what it writes.</p>
+    <div id="resultList"></div>
+  </section>
+
+  <section id="publish" class="panel">
+    <h2>Publish</h2>
+    <div class="row">
+      <a id="ghNew" href="https://github.com/new" target="_blank" rel="noopener noreferrer" class="button">Create repo on GitHub ↗</a>
+      <code id="ghCmd" class="grow">gh repo create &lt;name&gt; --source &lt;path&gt; --private</code>
+      <button id="ghCopy" type="button" class="ghost">copy</button>
+      <span class="hint">The UI never pushes or runs gh: paste this in your terminal.</span>
+    </div>
+  </section>
+</main>
+
+<template id="taskRow">
+  <div class="task">
+    <div class="row">
+      <label>name <input class="t-name" placeholder="billing" autocomplete="off" spellcheck="false"></label>
+      <label>preset
+        <select class="t-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select>
+      </label>
+      <label>max_turns <input class="t-turns" type="number" min="1" max="50" value="10"></label>
+      <button type="button" class="t-remove ghost">remove</button>
+    </div>
+    <label>prompt <textarea class="t-prompt" rows="2" placeholder="Add a one-line docstring to every function in calc.py. Do not change behaviour."></textarea></label>
+    <label>paths <input class="t-paths" placeholder="calc.py src/billing/**" autocomplete="off" spellcheck="false"></label>
+  </div>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>
