@@ -101,6 +101,11 @@
       <button id="orchestraCommit" type="button" class="ghost" hidden>Commit .orchestra/</button>
     </div>
     <ul id="rolesErrors" class="errors"></ul>
+    <div id="rolesTrust" class="trust" hidden>
+      <p class="reminder">These roles and this project context were not created from this UI, or changed since you confirmed them. Their instructions reach the model. Review them below (select each role), then confirm. Runs on this repository are blocked until you do.</p>
+      <ul id="rolesPreview" class="warnings"></ul>
+      <button id="roleTrust" type="button">I reviewed them: confirm roles</button>
+    </div>
     <div class="task" id="roleForm">
       <div class="row">
         <label>name <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>

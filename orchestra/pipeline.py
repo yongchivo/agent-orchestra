@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import orchestrator, scope, worktree
+from . import orchestrator, roles as roles_mod, scope, worktree
 from .worker import FINDINGS_SCHEMA, Task, Worker, agent_env, write_agent_config
 
 MAX_STEPS = 8
@@ -189,17 +189,42 @@ def planner_command(request, system, max_turns=3, env=None):
     return cmd
 
 
-def _conversation(transcript, history):
-    """The user's messages are trusted; everything that came out of an agent is labelled."""
-    out = []
-    for m in transcript[-20:]:
-        out.append(f"[{m['who']}] {m['text'][:2000]}")
-    if history:
-        out.append(wrap_artifact("pipeline", "orchestrator", "summary", history))
-    return "\n".join(out)
+def state_summary(result):
+    """What the planner may learn about a finished run: a structured summary built by the
+    program. Step ids, roles, statuses, rounds, the paths touched and finding counts by
+    severity. Never an agent's text (summaries, finding descriptions, diffs)."""
+    steps = []
+    for s in result.get("steps", []):
+        counts = {sev: sum(1 for f in s.get("findings", []) if f.get("severity") == sev) for sev in SEVERITIES}
+        steps.append({"id": s["id"], "role": s["role"], "status": s["status"], "rounds": s["iteration"],
+                      "files": [str(f)[:200] for f in s.get("files", [])][:50],
+                      "findings": {k: v for k, v in counts.items() if v}})
+    return {"run": result.get("run_id"), "steps": steps, "correction_rounds": result.get("iterations", 0),
+            "pending_findings": {sev: sum(1 for f in result.get("pending_findings", []) if f.get("severity") == sev)
+                                 for sev in SEVERITIES},
+            "error": str(result.get("error") or "")[:300] or None}
 
 
-def propose(request, roles, project_context, backend="claude", transcript=(), history="",
+def planner_prompt(request, transcript=(), history=(), rejected=None):
+    """The user's messages and the planner's own earlier replies, plus state_summary() dicts
+    for the runs so far. Nothing produced by a worker agent is in here."""
+    lines = []
+    for m in list(transcript)[-20:]:
+        if m.get("who") in ("you", "orchestrator"):
+            lines.append(f"[{m['who']}] {m['text'][:2000]}")
+    prompt = request
+    if lines or history:
+        prompt = "Conversation so far:\n" + "\n".join(lines)
+        if history:
+            prompt += ("\n\nState of the runs so far, produced by the program (not by any agent):\n"
+                       + json.dumps(list(history), indent=1))
+        prompt += f"\n\nNew request from the user:\n{request}"
+    if rejected:
+        prompt += f"\n\nYour previous plan was rejected by the validator: {rejected}. Propose a corrected plan."
+    return prompt
+
+
+def propose(request, roles, project_context, backend="claude", transcript=(), history=(),
             rejected=None, cwd=None):
     """Ask the planner for a raw plan dict. The mock backend returns a JSON message verbatim
     (so a user or a test can hand it a plan) or a developer -> reviewers chain."""
@@ -218,12 +243,7 @@ def propose(request, roles, project_context, backend="claude", transcript=(), hi
             prev = [n[:16]] if roles[n].preset == "edit" else prev
         return {"summary": f"mock plan: {' -> '.join(order)}", "steps": steps}
     system = planner_system_prompt(roles, project_context)
-    prompt = request
-    convo = _conversation(transcript, history)
-    if convo:
-        prompt = f"Conversation so far:\n{convo}\n\nNew request from the user:\n{request}"
-    if rejected:
-        prompt += f"\n\nYour previous plan was rejected by the validator: {rejected}. Propose a corrected plan."
+    prompt = planner_prompt(request, transcript, history, rejected)
     try:
         r = subprocess.run(planner_command(prompt, system), env=agent_env(), cwd=cwd,
                            capture_output=True, text=True, timeout=PLANNER_TIMEOUT, check=False,
@@ -395,6 +415,10 @@ class Pipeline:
         self.run_dir = run_dir
         # "_pipeline" cannot clash with a step id (ids never contain "_").
         self.int_path, self.branch = worktree.create(self.repo, run_dir, self.run_id, "_pipeline", self.base_ref)
+        if not roles_mod.trusted(self.repo, self.state_dir):
+            # The role instructions reach the model: the user must have seen them. The UI blocks
+            # here; the core warns, like it does for CLAUDE.md.
+            self.bus.emit("orchestrator", "warning", roles_mod.UNCONFIRMED, files=[roles_mod.DIR])
         self.bus.emit("orchestrator", "run_start", f"pipeline: {len(self.steps)} steps on {branch}",
                       run_id=self.run_id, workers=[s.id for s in self.steps], backend=self.backend,
                       mode="pipeline", roles={s.id: s.role for s in self.steps})

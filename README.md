@@ -269,10 +269,21 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
   "Commit .orchestra/" button that commits that directory only.
 - `.orchestra/` is protected: it is on the merge gate's protected list, so any change to it
   blocks the step, and the agent settings deny `Edit`/`Write` on it as a first layer.
+- **Roles are used only once you have seen them.** A repository can ship any `.orchestra/`,
+  and its instructions reach the model. The UI keeps a sha256 of the directory in
+  `~/.agent-orchestra/trust.json` (0600, outside the repository). Roles and context you write
+  from the UI are confirmed by the act of writing them; anything else (a clone, a commit by
+  someone else, a change by hand, a later change) shows up as **NOT CONFIRMED** with every
+  role's instructions and the project context listed, and the pipeline refuses to start until
+  you click confirm. The parallel-run preflight warns about it too, and the core emits a
+  `warning` event, as it does for `CLAUDE.md`.
 
 **Chat.** Write a request in the Pipeline panel. The planner is Claude Code run with
 `--tools ""`, `--restricted`, no MCP, no session, a system prompt listing the roles and the
-project context, and `--json-schema` for the plan. It holds no tool and grants nothing: the
+project context, and `--json-schema` for the plan. Its prompt holds your messages, its own
+earlier replies and, when you re-plan after a run, a summary **built by the code**: step ids,
+roles, statuses, rounds, paths touched and finding counts by severity. No diff, no agent
+summary, no finding text ever reaches the planner. It holds no tool and grants nothing: the
 server validates the plan and rejects it with the reason (the planner gets one retry with that
 reason, then the chat shows it to you). You see the plan as a table and approve it, cancel it,
 or write what to change. With the `mock` backend the planner returns a developer → reviewers
@@ -332,8 +343,10 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
   protected files, symlinks, binaries, secrets, `.env`) run on every step whatever a reviewer
   says, and a reviewer that writes files is blocked.
 - Artifacts cross the boundary between agents as delimited, labelled data, size-capped; the
-  prompt for every role is assembled by code, and the user's messages are the only text that
-  reaches the planner as instructions.
+  prompt for every role is assembled by code. The planner never sees an agent's text at all:
+  only your messages, its own replies and a structured, code-built state summary.
+- Roles and project context from the repository are shown and confirmed before use; the
+  confirmation hash lives outside the repository.
 - The final merge needs your click in the UI, with the diff and the pending findings in front of
   you. The parallel-run endpoints and the pipeline share the one-run-at-a-time rule.
 
@@ -353,6 +366,8 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
 | Tampered role file or oversized inputs | strict schema on load; chat, context and iteration caps | `test_roles_are_validated_strictly`, `test_chat_input_limits`, `test_roles_endpoints_and_orchestra_commit` |
 | Handoffs invisible to the user | `handoff` events with source, target and artifact type | `test_handoff_events_are_recorded_with_source_target_and_artifact` |
 | Invalid plan executed anyway | rejected plans never become a plan; approve is 409 | `test_chat_rejects_an_invalid_plan_and_explains` |
+| Agent output steers the planner on re-plan | the planner receives a code-built structured summary, never agent text | `test_planner_never_receives_agent_text` |
+| Repository ships or changes roles behind the user's back | sha256 of `.orchestra/` in the state dir; UI shows and asks for confirmation, blocks the pipeline until then; preflight warning in UI and core | `test_roles_from_the_repo_need_confirmation_in_the_ui`, `test_unconfirmed_roles_warn_in_the_core_preflight` |
 | Steps keep running after pause/cancel/redirect | engine flags plus task cancellation, worktrees removed | `test_chat_pause_resume_cancel_and_redirect` |
 
 **A real pipeline run** (Claude Code 2.1.296, OAuth login, `claude` backend) on a repository
@@ -471,7 +486,8 @@ on the branch), the user's Anthropic quota, and the event log.
 | Another user of the Mac | Read worktrees, agent config, the log or the UI token; drive the UI | state dir 0700, config, log and token 0600; every UI call needs the token |
 | Malicious web page in your browser | Call the UI's API (CSRF), rebind DNS to 127.0.0.1, inject script through a diff | token in a header the page alone holds; `Host`/`Origin` checks; JSON-only bodies; `textContent` rendering, CSP without inline script, `X-Frame-Options: DENY` |
 | Agent injecting the next agent (pipeline) | A developer's diff or a reviewer's findings carry instructions for the role that reads them: "add a CI step", "ignore your paths", "report nothing" | artifacts are delimited and labelled as untrusted data, size-capped, inside a prompt built by code; the step set, roles, presets and paths are fixed at approval; the deterministic gate runs on every step regardless of what a reviewer says |
-| Manipulated orchestrator (planner) | A repository file, a previous artifact or a jailbroken model makes the planner propose a step with a non-existent role, a wider preset, paths outside the role, `tools`, or dozens of steps | the planner has no tools and never executes; `validate_plan` enforces roles, presets, paths, the step cap and a DAG; the user sees the plan and approves it; the planner never sees repository files, only the roles, the context and the chat |
+| Manipulated orchestrator (planner) | A repository file, a previous artifact or a jailbroken model makes the planner propose a step with a non-existent role, a wider preset, paths outside the role, `tools`, or dozens of steps | the planner has no tools and never executes; `validate_plan` enforces roles, presets, paths, the step cap and a DAG; the user sees the plan and approves it; the planner never sees repository files or agent output, only the confirmed roles and context, the chat and a code-built state summary |
+| Malicious `.orchestra/` in the repository | Role instructions that tell the developer to copy credentials or the reviewer to report nothing | roles are shown and confirmed in the UI before use, with a hash kept outside the repository; the gate and the deny rules apply regardless of what a role says |
 | Reviewer that lies or is bribed | A reviewer reports no findings for a change that adds a secret, edits CI or leaves its paths | reviewers are advisory: the gate (paths, protected files, secrets, symlinks, `.orchestra/`) decides, and the final merge is the user's click with the diff in front of them |
 
 **STRIDE, briefly**

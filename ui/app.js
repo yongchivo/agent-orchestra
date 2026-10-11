@@ -274,7 +274,12 @@
     $('roleTemplates').disabled = !(rolesData.templates || []).length;
     $('orchestraCommit').hidden = !(rolesData.uncommitted || []).length;
     setList($('rolesErrors'), rolesData.error ? [rolesData.error] : []);
-    $('rolesState').textContent = `${(rolesData.roles || []).length} roles` +
+    const untrusted = rolesData.trusted === false && !rolesData.error;
+    $('rolesTrust').hidden = !untrusted;
+    if (untrusted) setList($('rolesPreview'), (rolesData.roles || []).map(r =>
+      `${r.name} · ${r.preset} · ${r.output} · paths ${r.paths.join(' ')} — ${r.description} — instructions: ${r.instructions}`)
+      .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : []));
+    $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
       ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '');
   }
   async function loadRoles() {
@@ -293,6 +298,7 @@
   $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(`Delete role ${n}?`)) rolesPost('/api/roles/delete', { name: n }).then(() => fillRole(null)); });
   $('roleTemplates').addEventListener('click', () => rolesPost('/api/roles/templates', {}));
   $('projectSave').addEventListener('click', () => rolesPost('/api/project', { context: $('projectCtx').value }));
+  $('roleTrust').addEventListener('click', () => rolesPost('/api/roles/trust', {}).then(runCheck));
   $('orchestraCommit').addEventListener('click', () => { if (confirm('Commit .orchestra/ (roles and project context) on the current branch?')) rolesPost('/api/roles/commit', {}); });
   $('repo').addEventListener('change', loadRoles);
 

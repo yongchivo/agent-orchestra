@@ -6,7 +6,9 @@ findings). .orchestra/ also holds project.json with the project context. The dir
 protected: the merge gate never lets an agent's change to it through, and the agent's
 settings deny Edit/Write on it as well.
 """
+import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -181,3 +183,53 @@ def uncommitted(repo, git):
     return [line[3:] for line in out.splitlines() if line.strip()]
 
 
+
+
+# --- trust: roles the user has seen and confirmed --------------------------------------------
+# A repository can ship any .orchestra/ it likes, and its instructions reach the model. The UI
+# only uses roles and a project context the user created there or explicitly confirmed; the
+# fingerprint lives in the state directory, outside the repository.
+
+def fingerprint(repo):
+    """sha256 over every file under .orchestra/ (relative path and bytes), or "" when absent."""
+    root = Path(repo) / DIR
+    if not root.is_dir():
+        return ""
+    h = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        h.update(str(path.relative_to(root)).encode("utf-8") + b"\0")
+        h.update(path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def _trust_path(state_dir):
+    return Path(state_dir) / "trust.json"
+
+
+def _trust_load(state_dir):
+    try:
+        data = json.loads(_trust_path(state_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def trusted(repo, state_dir):
+    """True when .orchestra/ is absent or matches what the user last confirmed."""
+    fp = fingerprint(repo)
+    return fp == "" or _trust_load(state_dir).get(str(Path(repo).resolve())) == fp
+
+
+def trust(repo, state_dir):
+    """Record the current .orchestra/ as confirmed (0600, in the state directory)."""
+    data = _trust_load(state_dir)
+    data[str(Path(repo).resolve())] = fingerprint(repo)
+    path = _trust_path(state_dir)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+UNCONFIRMED = ("the roles and project context in .orchestra/ were not created from this UI, or changed "
+               "since you confirmed them: review them in Roles & project and confirm before a run")

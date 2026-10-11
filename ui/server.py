@@ -150,7 +150,7 @@ class Chat:
         self.base = self.branch = None   # original base commit; latest integration branch
         self.result = self.error = None
         self.offset = 0
-        self.history = []            # one line per finished run, for re-planning
+        self.history = []            # pipeline.state_summary() per finished run, for re-planning
 
     def say(self, who, text):
         self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
@@ -195,13 +195,15 @@ class Chat:
         roles = roles_mod.load_roles(repo)
         if not roles:
             raise ValueError("the repository has no roles: install the templates or create one first")
+        if not roles_mod.trusted(repo, self.srv.state_dir):
+            raise ValueError(roles_mod.UNCONFIRMED)
         self.__init__(self.srv)
         self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
         self.roles, self.project_context = roles, roles_mod.project_context(repo)
         self.srv.remember_repo(repo)
 
     def _plan(self, request):
-        history = "\n".join(self.history)
+        history = list(self.history)
         rejected = None
         for _ in range(2):  # one retry with the validator's explanation
             try:
@@ -269,8 +271,7 @@ class Chat:
         r = self.result
         statuses = ", ".join(f"{s['id']}: {s['status']}" for s in r["steps"])
         pending = r["pending_findings"]
-        self.history.append(f"run {r['run_id']}: {statuses}; {len(pending)} findings pending"
-                            + (f"; error: {self.error}" if self.error else ""))
+        self.history.append(pipeline.state_summary(dict(r, error=self.error)))
         msg = f"Run finished: {statuses}."
         if self.error:
             msg += f" {self.error}."
@@ -419,6 +420,8 @@ class UIServer(ThreadingHTTPServer):
             except RuntimeError as exc:
                 errors.append(str(exc))
             info["steering"] = worktree.agent_instruction_files(repo)
+            if not roles_mod.trusted(repo, self.state_dir):
+                warnings.append(roles_mod.UNCONFIRMED)
         backend = body.get("backend", "mock")
         if backend not in BACKENDS:
             errors.append(f"backend must be one of {list(BACKENDS)}")
@@ -564,28 +567,41 @@ class UIServer(ThreadingHTTPServer):
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
                 "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
-                "uncommitted": roles_mod.uncommitted(repo, worktree.git)}
+                "uncommitted": roles_mod.uncommitted(repo, worktree.git),
+                "trusted": roles_mod.trusted(repo, self.state_dir)}
+
+    def _edited(self, repo):
+        """What the user writes from the UI is what they confirmed."""
+        roles_mod.trust(repo, self.state_dir)
+        return self.roles_view(str(repo))
 
     def save_role(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         role = roles_mod.role_from_json(body.get("role"))
         roles_mod.save_role(repo, role)
-        return self.roles_view(str(repo))
+        return self._edited(repo)
 
     def delete_role(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         roles_mod.delete_role(repo, str(body.get("name", "")))
-        return self.roles_view(str(repo))
+        return self._edited(repo)
 
     def install_templates(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         roles_mod.install_templates(repo)
-        return self.roles_view(str(repo))
+        return self._edited(repo)
 
     def save_project(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         roles_mod.save_project_context(repo, body.get("context"))
-        return self.roles_view(str(repo))
+        return self._edited(repo)
+
+    def trust_roles(self, body):
+        """The user has reviewed .orchestra/ as shown in the UI and confirms it."""
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        roles_mod.load_roles(repo)       # never confirm something that does not validate
+        roles_mod.project_context(repo)
+        return self._edited(repo)
 
     def commit_orchestra(self, body):
         """Commit .orchestra/ only (roles must be committed: the run preflight needs a clean tree)."""
@@ -753,6 +769,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.install_templates(body))
             if path == "/api/roles/commit":
                 return self._json(200, srv.commit_orchestra(body))
+            if path == "/api/roles/trust":
+                return self._json(200, srv.trust_roles(body))
             if path == "/api/project":
                 return self._json(200, srv.save_project(body))
             if path == "/api/chat":

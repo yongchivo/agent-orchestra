@@ -93,3 +93,5 @@ pre.diff .add { color: var(--green); } pre.diff .del { color: var(--red); } pre.
 .msg.kind-question .txt { color: var(--yellow); }
 .node.blocked { border-color: var(--yellow); }
 code { color: var(--text); }
+.trust { border: 1px solid var(--yellow); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.trust .reminder { margin-top: 0; }
