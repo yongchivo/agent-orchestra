@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agent-orchestra · control</title>
+<title>Uno · control</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header id="top">
-  <span class="brand">◆ agent-orchestra</span>
+  <span class="brand">◆ Uno</span>
   <span id="statusText">connecting…</span>
   <span id="conn">● …</span>
 </header>
@@ -93,12 +93,12 @@
 
   <section id="rolesPanel" class="panel">
     <h2>Roles &amp; project <span id="rolesState" class="hint"></span></h2>
-    <p class="hint">Stored in <code>.orchestra/</code> of the repository above (agents can read it, never change it). Roles must be committed before a run.</p>
+    <p class="hint">Stored in <code>.uno/</code> of the repository above (agents can read it, never change it). Roles must be committed before a run.</p>
     <div class="row">
       <label>role <select id="roleList"></select></label>
       <button id="roleNew" type="button" class="ghost">+ new role</button>
       <button id="roleTemplates" type="button" class="ghost">Install templates (developer, security-analyst, architect)</button>
-      <button id="orchestraCommit" type="button" class="ghost" hidden>Commit .orchestra/</button>
+      <button id="orchestraCommit" type="button" class="ghost" hidden>Commit .uno/</button>
     </div>
     <ul id="rolesErrors" class="errors"></ul>
     <div id="rolesTrust" class="trust" hidden>

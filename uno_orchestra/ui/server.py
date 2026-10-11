@@ -1,4 +1,4 @@
-"""Local web UI for agent-orchestra: launch and review runs without the terminal.
+"""Local web UI for Uno: launch and review runs without the terminal.
 
 Single user, loopback only. The server enforces every rule and the page only displays
 them: a random per-start token in a header on every API call (never a cookie or query
@@ -16,15 +16,15 @@ import re
 import threading
 import time
 from dataclasses import asdict
+from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from orchestra import orchestrator, pipeline, roles as roles_mod, scope, worktree
-from orchestra.bus import EventBus
-from orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
+from uno_orchestra import orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra.bus import EventBus
+from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
-HERE = Path(__file__).resolve().parent
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -151,7 +151,7 @@ class Chat:
         self.result = self.error = None
         self.offset = 0
         self.history = []            # pipeline.state_summary() per finished run, for re-planning
-        self.fingerprint = None      # the .orchestra/ snapshot the loaded roles came from
+        self.fingerprint = None      # the .uno/ snapshot the loaded roles came from
 
     def say(self, who, text):
         self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
@@ -193,7 +193,7 @@ class Chat:
         iters = body.get("max_iterations", pipeline.DEFAULT_ITERATIONS)
         if not isinstance(iters, int) or isinstance(iters, bool) or not 1 <= iters <= pipeline.MAX_ITERATIONS:
             raise ValueError(f"max_iterations must be an integer 1..{pipeline.MAX_ITERATIONS}")
-        # Roles, context and fingerprint come from one snapshot of .orchestra/: what was
+        # Roles, context and fingerprint come from one snapshot of .uno/: what was
         # hashed is what the agents get. Checked again at approve(), right before the run.
         roles, context, fp = roles_mod.load_confirmed(repo, self.srv.state_dir)
         if not roles:
@@ -233,7 +233,7 @@ class Chat:
             return 409, {"error": "there is no plan waiting for approval"}
         if self.srv.running():
             return 409, {"error": "a run is already in progress"}
-        # .orchestra/ may have changed on disk since the roles were loaded: the run uses the
+        # .uno/ may have changed on disk since the roles were loaded: the run uses the
         # loaded roles, so it must still be exactly the confirmed snapshot.
         if (roles_mod.fingerprint(self.repo) != self.fingerprint
                 or not roles_mod.trusted(self.repo, self.srv.state_dir)):
@@ -563,7 +563,7 @@ class UIServer(ThreadingHTTPServer):
         return {"repo": str(data.get("repo", "")), "backend": data.get("backend", "mock"),
                 "parallel": data.get("parallel", 2), "tasks": [asdict(t) for t in tasks]}
 
-    # -- roles and project context (.orchestra/ in the repository)
+    # -- roles and project context (.uno/ in the repository)
     def roles_view(self, repo_raw):
         repo = validate_repo(repo_raw, self.allowed_roots)
         error, roles = None, {}
@@ -572,6 +572,9 @@ class UIServer(ThreadingHTTPServer):
             context = roles_mod.project_context(repo)
         except ValueError as exc:
             error, context = str(exc), ""
+        if error is None and roles_mod.has_legacy_dir(repo):
+            error = (f"this repository has a pre-0.1.0 {roles_mod.LEGACY_DIR}/: run `uno init` inside it "
+                     f"to rename it to {roles_mod.DIR}/ (roles are read from {roles_mod.DIR}/ only)")
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
                 "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
@@ -605,17 +608,17 @@ class UIServer(ThreadingHTTPServer):
         return self._edited(repo)
 
     def trust_roles(self, body):
-        """The user has reviewed .orchestra/ as shown in the UI and confirms it."""
+        """The user has reviewed .uno/ as shown in the UI and confirms it."""
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         roles_mod.load_roles(repo)       # never confirm something that does not validate
         roles_mod.project_context(repo)
         return self._edited(repo)
 
-    def commit_orchestra(self, body):
-        """Commit .orchestra/ only (roles must be committed: the run preflight needs a clean tree)."""
+    def commit_roles(self, body):
+        """Commit .uno/ only (roles must be committed: the run preflight needs a clean tree)."""
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         worktree.git(repo, "add", "--", roles_mod.DIR)
-        r = worktree.git(repo, *worktree.IDENT, "commit", "-q", "-m", "orchestra: roles and project context",
+        r = worktree.git(repo, *worktree.IDENT, "commit", "-q", "-m", "uno: roles and project context",
                          "--", roles_mod.DIR, check=False)
         if r.returncode != 0:
             raise ValueError(f"git commit failed: {(r.stdout + r.stderr).strip()[:200]}")
@@ -625,7 +628,7 @@ class UIServer(ThreadingHTTPServer):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         if worktree.git(repo, "status", "--porcelain").stdout.strip():
             raise ValueError("the repository has uncommitted changes: commit or stash them first")
-        name = body.get("name") or datetime.datetime.now().strftime("orchestra-run-%Y%m%d-%H%M")
+        name = body.get("name") or datetime.datetime.now().strftime("uno-run-%Y%m%d-%H%M")
         if not isinstance(name, str) or not BRANCH_RE.match(name) or name in ("main", "master"):
             raise ValueError("invalid branch name")
         r = worktree.git(repo, "checkout", "-b", name, check=False)
@@ -698,7 +701,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in STATIC:
             name, ctype = STATIC[path]
-            return self._send(200, ctype, (HERE / name).read_bytes())
+            return self._send(200, ctype, resources.files(__package__).joinpath(name).read_bytes())
         srv = self.server
         if path == "/api/status":
             run = srv.run
@@ -776,7 +779,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/roles/templates":
                 return self._json(200, srv.install_templates(body))
             if path == "/api/roles/commit":
-                return self._json(200, srv.commit_orchestra(body))
+                return self._json(200, srv.commit_roles(body))
             if path == "/api/roles/trust":
                 return self._json(200, srv.trust_roles(body))
             if path == "/api/project":

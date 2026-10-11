@@ -62,10 +62,12 @@ def agent_settings():
     return {
         "disableAllHooks": True,
         "permissions": {
-            # .orchestra/ holds the roles and project context: no agent edits it (the merge
-            # gate blocks it deterministically too; this is the first layer).
+            # .uno/ holds the roles and project context: no agent edits it (the merge gate
+            # blocks it deterministically too; this is the first layer). .orchestra/ is the
+            # pre-0.1.0 name and stays denied until the repository migrates.
             "deny": [f"Read({d}/**)" for d in SENSITIVE_DIRS] + ["Read(//**/.env*)"]
-                    + ["Edit(//**/.orchestra/**)", "Write(//**/.orchestra/**)"] + DENIED_TOOLS,
+                    + [f"{tool}(//**/{d}/**)" for d in (".uno", ".orchestra") for tool in ("Edit", "Write")]
+                    + DENIED_TOOLS,
         },
         # Defence in depth: Bash is removed above. If a future preset brought it back, the
         # OS sandbox (seatbelt on macOS, bubblewrap on Linux) would still confine it.

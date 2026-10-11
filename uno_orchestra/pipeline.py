@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import orchestrator, roles as roles_mod, scope, worktree
+from . import orchestrator, roles as roles_mod, scope, state, worktree
 from .worker import FINDINGS_SCHEMA, Task, Worker, agent_env, write_agent_config
 
 MAX_STEPS = 8
@@ -311,7 +311,7 @@ def compose_prompt(step, role, project_context, artifacts):
     parts.append(f"Task (step {step.id}): {step.goal}")
     if role.preset == "edit":
         parts.append("You may only change files matching: " + ", ".join(step.paths)
-                     + ". Never modify .orchestra/, CI, build or dependency files. Do not commit.")
+                     + f". Never modify {roles_mod.DIR}/, CI, build or dependency files. Do not commit.")
     else:
         parts.append("You must not change any file: read and report only.")
     if step.iteration > 1:
@@ -355,7 +355,7 @@ class Pipeline:
         self.max_parallel = max_parallel
         self.max_iterations = max_iterations
         self.timeout = timeout
-        self.state_dir = Path(state_dir or Path.home() / ".agent-orchestra")
+        self.state_dir = Path(state_dir or state.default_dir())
         self.project_context = project_context
         self.base_ref = base_ref       # where the integration branch starts (HEAD, or a previous one)
         self.base = base               # commit the consolidated diff is taken against

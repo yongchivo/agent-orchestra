@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uno-orchestra"
+version = "0.1.0"
+description = "Uno: run locked-down Claude Code agents on a repository, in parallel or as a role pipeline, with a local control UI."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/yongchivo/uno-orchestra"
+
+[project.scripts]
+uno = "uno_orchestra.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["uno_orchestra*"]
+
+[tool.setuptools.package-data]
+"uno_orchestra.ui" = ["*.html", "*.js", "*.css"]
+"uno_orchestra.dashboard" = ["*.html"]

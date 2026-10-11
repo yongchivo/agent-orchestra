@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import scope, worktree
+from . import scope, state, worktree
 from .bus import EventBus
 from .worker import Task, Worker, write_agent_config
 
@@ -41,7 +41,7 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
         bus.emit("orchestrator", "warning", msg[:300], files=steering)
     run_id = uuid.uuid4().hex[:6]
     # Worktrees live under the state directory, never next to the repository.
-    state_dir = Path(state_dir or Path.home() / ".agent-orchestra")
+    state_dir = Path(state_dir or state.default_dir())
     run_dir = state_dir / "worktrees" / run_id
     for d in (state_dir, state_dir / "worktrees", run_dir):
         _mkdir_private(d)

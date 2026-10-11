@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
-IDENT = ["-c", "user.name=agent-orchestra", "-c", "user.email=orchestra@localhost"]
+IDENT = ["-c", "user.name=uno-orchestra", "-c", "user.email=uno@localhost"]
 
 
 def git(repo, *args, check=True):

@@ -1,7 +1,10 @@
 events.jsonl
 __pycache__/
 .pytest_cache/
-.orchestra-*/
+.uno-*/
+*.egg-info/
+dist/
 .venv/
 .DS_Store
 .claude/
+build/

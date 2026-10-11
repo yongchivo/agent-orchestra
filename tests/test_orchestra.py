@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from orchestra import orchestrator, scope, worktree
-from orchestra.bus import EventBus
-from orchestra.worker import (DENIED_TOOLS, MAX_TURNS, PRESETS, Task, Worker, agent_env,
+from uno_orchestra import orchestrator, scope, worktree
+from uno_orchestra.bus import EventBus
+from uno_orchestra.worker import (DENIED_TOOLS, MAX_TURNS, PRESETS, Task, Worker, agent_env,
                               agent_settings, write_agent_config)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +61,7 @@ def free_port():
 
 def start_dashboard(events, *extra):
     port = free_port()
-    proc = subprocess.Popen([sys.executable, "-u", str(ROOT / "dashboard" / "server.py"),
+    proc = subprocess.Popen([sys.executable, "-u", "-m", "uno_orchestra.dashboard.server",
                              "--events", str(events), "--port", str(port), *extra],
                             stdout=subprocess.PIPE, text=True)
     banner = proc.stdout.readline()
@@ -219,7 +219,7 @@ def test_worktrees_live_in_the_state_dir(repo, tmp_path):
     run(repo, [T("a")], tmp_path / "e.jsonl", keep_worktrees=True)
     runs = list((tmp_path / "state" / "worktrees").iterdir())
     assert len(runs) == 1 and (runs[0] / "a" / "a.txt").exists()
-    assert not [p for p in repo.parent.iterdir() if p.name.startswith(".orchestra")]
+    assert not [p for p in repo.parent.iterdir() if p.name.startswith((".orchestra", ".uno"))]
 
 
 def test_each_agent_commits_only_in_its_own_worktree(repo, tmp_path):
@@ -228,7 +228,7 @@ def test_each_agent_commits_only_in_its_own_worktree(repo, tmp_path):
         branch = git(repo, "for-each-ref", "--format=%(refname:short)",
                      f"refs/heads/agent/*/{name}").strip()
         assert git(repo, "show", "--format=", "--name-only", branch).split() == [f"{name}.txt"]
-        assert git(repo, "show", "--format=%an", "-s", branch).strip() == "agent-orchestra"
+        assert git(repo, "show", "--format=%an", "-s", branch).strip() == "uno-orchestra"
 
 
 def test_merge_conflict_is_attributed_to_one_agent_and_aborted(repo, tmp_path, monkeypatch):
@@ -361,7 +361,7 @@ def test_sse_connections_are_capped(tmp_path):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
 def test_dashboard_escapes_xss_payload():
-    html = (ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
+    html = (ROOT / "uno_orchestra" / "dashboard" / "index.html").read_text(encoding="utf-8")
     esc_src = re.search(r"const esc = .*;", html).group(0)
     payload = "<img src=x onerror=alert(1)>\"'&"
     out = subprocess.run(["node", "-e", f"{esc_src} process.stdout.write(esc({json.dumps(payload)}))"],
@@ -374,7 +374,7 @@ def test_dashboard_escapes_xss_payload():
 # --- project -----------------------------------------------------------------------------
 
 def test_runtime_uses_only_the_standard_library():
-    for path in [ROOT / "main.py", ROOT / "dashboard" / "server.py", *ROOT.glob("orchestra/*.py")]:
+    for path in ROOT.glob("uno_orchestra/**/*.py"):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
@@ -384,7 +384,7 @@ def test_runtime_uses_only_the_standard_library():
                 continue
             for n in names:
                 top = n.split(".")[0]
-                assert top == "orchestra" or top in sys.stdlib_module_names, f"{path.name} imports {n}"
+                assert top == "uno_orchestra" or top in sys.stdlib_module_names, f"{path.name} imports {n}"
 
 
 def test_secret_in_diff_needs_review_without_leaking_it(repo, tmp_path, monkeypatch):
