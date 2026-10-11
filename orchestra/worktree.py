@@ -69,6 +69,25 @@ def changes(repo, base, branch):
     return out
 
 
+def show(repo, branch, path):
+    """Content of path on branch, as bytes."""
+    return subprocess.run(["git", *SAFE, "-C", str(repo), "show", f"{branch}:{path}"],
+                          capture_output=True, check=True).stdout
+
+
+AGENT_INSTRUCTION_FILES = {"CLAUDE.md", "AGENTS.md", ".claude"}
+
+
+def agent_instruction_files(repo):
+    """Tracked files that can steer an agent (CLAUDE.md, AGENTS.md, .claude/) at any depth."""
+    hits = []
+    for path in git(repo, "ls-files", "-z").stdout.split("\0"):
+        parts = path.split("/")
+        if parts[-1] in AGENT_INSTRUCTION_FILES or ".claude" in parts[:-1]:
+            hits.append(path)
+    return hits
+
+
 def merge(repo, branch):
     """Merge branch into the current branch of repo. Aborts cleanly on conflict."""
     r = git(repo, *IDENT, "merge", "--no-ff", "-m", f"Merge {branch}", branch, check=False)

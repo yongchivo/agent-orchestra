@@ -2,6 +2,7 @@
 import asyncio
 import os
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -31,6 +32,13 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
     repo = Path(repo).resolve()
     branch = worktree.preflight(repo)
     base = worktree.head(repo)
+    steering = worktree.agent_instruction_files(repo)
+    if steering:
+        # Only --bare (API-key auth) keeps these out of the model's context. See README.
+        msg = ("the repository contains agent instruction files that may reach the model: "
+               + ", ".join(steering[:10]) + (" ..." if len(steering) > 10 else ""))
+        print(f"warning: {msg}", file=sys.stderr)
+        bus.emit("orchestrator", "warning", msg[:300], files=steering)
     run_id = uuid.uuid4().hex[:6]
     # Worktrees live under the state directory, never next to the repository.
     state_dir = Path(state_dir or Path.home() / ".agent-orchestra")
@@ -64,7 +72,8 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
             if w.status != "done":
                 summary[w.name] = "failed"
                 continue
-            verdict, detail = scope.check(worktree.changes(repo, base, w.branch), w.task.paths)
+            verdict, detail = scope.check(worktree.changes(repo, base, w.branch), w.task.paths,
+                                          read=lambda path, b=w.branch: worktree.show(repo, b, path))
             if verdict != "ok":
                 summary[w.name] = verdict
                 bus.emit("orchestrator", verdict, detail[:300], target=w.name, branch=w.branch)

@@ -87,7 +87,13 @@ Task format (`tasks.json`):
 Each agent ends in one state: `merged`, `conflict`, `out_of_scope` (touched files outside
 `paths`), `needs_review` (touched a protected file, added a symlink or a large binary) or
 `failed` (error or timeout). Branches `agent/<run>/<name>` are kept for the last three so you
-can inspect them.
+can inspect them (`git diff <branch>...<your-branch>`, `git merge <branch>` once reviewed). When
+you no longer need them:
+
+```bash
+git branch --list 'agent/*'                                   # see what is there
+git for-each-ref --format='%(refname:short)' refs/heads/agent/ | xargs git branch -D
+```
 
 Event format (`events.jsonl`, one JSON object per line):
 
@@ -96,8 +102,8 @@ Event format (`events.jsonl`, one JSON object per line):
  "kind": "progress", "message": "40%", "progress": 40}
 ```
 
-Kinds: `run_start`, `start`, `say`, `tool`, `progress`, `done`, `failed`, `merge`, `conflict`,
-`out_of_scope`, `needs_review`, `run_end`.
+Kinds: `run_start`, `warning`, `start`, `say`, `tool`, `progress`, `done`, `failed`, `merge`,
+`conflict`, `out_of_scope`, `needs_review`, `run_end`.
 
 ## Dashboard
 
@@ -152,7 +158,10 @@ attackers. Flags were verified against `claude --help` of Claude Code 2.1.296.
 
 - Every git call runs with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, never with
   `shell=True`, so a repository cannot run code through hooks or the fsmonitor command.
-- Preflight: the tree must be clean and the current branch must not be `main` or `master`.
+- Preflight: the tree must be clean and the current branch must not be `main` or `master`. If
+  the repository tracks `CLAUDE.md`, `AGENTS.md` or a `.claude/` directory at any depth, the run
+  prints a warning and emits a `warning` event naming them: those files can steer the agent and
+  only `--bare` keeps them out of context (see residual risks).
 - Worktrees live in `~/.agent-orchestra/worktrees/<run_id>` (0700), not next to the repository.
 - `try/finally`: agent processes and worktrees are always cleaned up, also after an error or
   Ctrl+C.
@@ -162,8 +171,11 @@ attackers. Flags were verified against `claude --help` of Claude Code 2.1.296.
 - Each task declares `paths`. A diff that touches anything else is not merged: `out_of_scope`.
 - Protected files are never merged automatically even when `paths` cover them: `.github/`,
   `.claude/`, `CLAUDE.md`, `.git*`, `.gitattributes`, `.gitmodules`, `Makefile`, `*.sh`,
-  `setup.py`, `pyproject.toml`, `package.json`, `requirements*.txt`, `Dockerfile`. New symlinks
-  and new binaries over 1 MiB are blocked too: `needs_review`.
+  `setup.py`, `pyproject.toml`, `package.json`, `requirements*.txt`, `Dockerfile`. New symlinks,
+  new binaries over 1 MiB and any `.env*` file are blocked too: `needs_review`.
+- Every text file in the diff is scanned with the same secret patterns the log redacts
+  (`sk-…`, `ghp_…`, `AKIA…`, `BEGIN PRIVATE KEY`). A hit is reported as `file:line (possible
+  secret)` without the secret itself, and the branch is not merged.
 - Merges are serialised and aborted on conflict, so a conflict is attributable to one agent and
   the branch is never left half-merged.
 
@@ -218,8 +230,11 @@ on the branch), the user's Anthropic quota, and the event log.
   network except the API) would close this gap.
 - **The model can be manipulated inside its scope.** Within `paths`, an injected agent can still
   write bad code. The gate limits where, not what. Review the diff before you ship it.
-- **CLAUDE.md with OAuth login.** Only `--bare` skips the repository's CLAUDE.md, and bare mode
-  requires `ANTHROPIC_API_KEY`. With a subscription login the file is loaded into context.
+- **Agent instruction files with OAuth login.** A repository's `CLAUDE.md`, `AGENTS.md` or
+  `.claude/` can carry prompt injection. Only `--bare` skips them, and bare mode requires
+  `ANTHROPIC_API_KEY`. With a subscription login they are loaded into context; the preflight
+  warning tells you when that is the case, and the merge gate still limits what such an agent
+  can land.
 - **`--restricted` is a Claude Code feature.** The confinement of the file tools and the
   ignoring of repository settings are enforced by the CLI (v2.1.248+), not by this project.
 - **Secret redaction is pattern-based.** It catches obvious key formats, not every secret.
@@ -237,8 +252,9 @@ The tests drive the `mock` backend against a temporary git repository on a featu
 back every control above: full runs with merges, per-agent isolation, a merge conflict attributed
 to one agent and aborted cleanly, Bash impossible to enable, MCP and repository settings
 disabled, the environment allowlist, a timeout that kills a process tree, git hooks and
-fsmonitor traps that never fire, preflight refusals, out-of-scope and protected-file diffs
-blocked, symlinks and large binaries blocked, cleanup after an exception, secret redaction,
+fsmonitor traps that never fire, preflight refusals and the instruction-file warning,
+out-of-scope and protected-file diffs blocked, symlinks, large binaries, `.env` files and
+secrets in the diff blocked, cleanup after an exception, secret redaction,
 0600/0700 permissions, log rotation, the dashboard allowlist (404 elsewhere), the SSE cap, and
 the HTML escaping against an XSS payload (needs `node`). CI runs the same suite.
 
