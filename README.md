@@ -190,7 +190,22 @@ paste; the UI never pushes or runs `gh`.
 | Another local user reads the token | 0600 file, 0700 state dir | `test_token_file_is_private` |
 | XSS through a diff or event | `textContent` only, CSP without inline script, security headers | `test_full_mock_flow_with_out_of_scope_and_xss_diff`, `test_security_headers_and_no_inline_script` |
 | Forgotten server | idle auto-shutdown | `test_idle_timeout_shuts_the_server_down` |
+| A response path that skips the headers | `HEAD` shares GET's routes; the base class's own errors are routed through the same sender | `test_head_matches_get_without_a_body`, `test_every_error_response_carries_security_headers` |
 | Runaway run | Stop kills process groups and cleans worktrees | `test_stop_cancels_the_run_and_cleans_up` |
+
+**Manual verification against a live server**
+
+```bash
+python start.py --port 8766            # terminal 1
+scripts/smoke_security.sh 8766         # terminal 2 (reads ~/.agent-orchestra/token)
+```
+
+The script sends one request per control to the running server and prints `PASS`/`FAIL`
+per check: no token → 401, token → 200, token in the query string → 401, forged `Origin` →
+403, forged `Host` → 403, non-JSON POST → 415, `HEAD` → 200 without a body, the security
+headers on normal responses and on 401/403/404/501 errors, the inline-script ban in the CSP,
+an unlisted file → 404, and the token file mode. It exits non-zero if anything fails. Pass a
+second argument to use another state directory.
 
 ## Security controls
 
