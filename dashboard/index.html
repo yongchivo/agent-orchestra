@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-orchestra</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #15171f; --panel: #1b1e28; --line: #3a3f52; --text: #d6d8e0; --dim: #7c8194;
+    --accent: #e8a27a; --blue: #7fc4f0; --green: #8fd4a0; --red: #f08a8a; --mono: "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 14px; }
+  body { display: grid; grid-template-rows: 1fr auto auto; overflow: hidden; }
+
+  #graph { position: relative; min-height: 0; }
+  #graph svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .link { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 2 5; fill: none; }
+  .packet { r: 5; }
+  .packet.up { fill: var(--accent); }
+  .packet.down { fill: var(--blue); }
+
+  .node {
+    position: absolute; transform: translate(-50%, -50%);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px 8px; min-width: 150px; white-space: nowrap;
+  }
+  .node .title { position: absolute; top: -10px; left: 12px; background: var(--bg); padding: 0 6px; font-weight: 700; }
+  .node .title::before { content: "✱ "; color: var(--accent); }
+  .node.orchestrator .title::before { content: "◆ "; color: var(--blue); }
+  .node .body { display: flex; gap: 14px; justify-content: space-between; align-items: baseline; margin-top: 4px; }
+  .node .pct { color: var(--dim); }
+  .node .bar { height: 2px; background: var(--line); margin-top: 8px; border-radius: 1px; overflow: hidden; }
+  .node .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .node.running .spin { display: inline-block; animation: spin 1.2s linear infinite; color: var(--dim); }
+  .node.done { border-color: var(--green); } .node.done .bar i { background: var(--green); }
+  .node.failed, .node.conflict { border-color: var(--red); } .node.failed .bar i, .node.conflict .bar i { background: var(--red); }
+  .node.orchestrator { border-color: #4a5068; }
+  .node.orchestrator .body { color: var(--blue); }
+  .node.orchestrator .sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #bus { height: 34vh; border-top: 1px solid var(--line); padding: 10px 16px 0; display: flex; flex-direction: column; min-height: 0; }
+  #bus h2 { margin: 0 0 6px; font-size: 13px; font-weight: 400; color: var(--dim); }
+  #log { overflow-y: auto; flex: 1; min-height: 0; }
+  .msg { display: grid; grid-template-columns: 90px 260px 1fr; gap: 12px; padding: 2px 0; line-height: 1.5; }
+  .msg .ts { color: var(--dim); } .msg .src { color: var(--accent); } .msg .src.orc { color: var(--blue); }
+  .msg .arrow { color: var(--dim); } .msg .tgt { color: var(--accent); } .msg .tgt.orc { color: var(--dim); }
+  .msg .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg.kind-conflict .txt, .msg.kind-failed .txt { color: var(--red); }
+  .msg.kind-merge .txt, .msg.kind-done .txt { color: var(--green); }
+
+  #status { background: #232633; color: var(--dim); padding: 6px 16px; font-size: 13px; display: flex; justify-content: space-between; }
+  #status b { color: var(--text); font-weight: 400; }
+  @media (max-width: 700px) { .msg { grid-template-columns: 70px 1fr; } .msg .txt { grid-column: 1 / -1; } .node { min-width: 120px; padding: 8px 10px 6px; } }
+</style>
+</head>
+<body>
+  <div id="graph"><svg id="links"></svg></div>
+  <section id="bus">
+    <h2>message bus — orchestrator ⇄ <span id="nagents">0</span> agents</h2>
+    <div id="log"></div>
+  </section>
+  <footer id="status"><span id="statusText">waiting for events…</span><span id="conn">● connecting</span></footer>
+
+<script>
+(() => {
+  const graph = document.getElementById('graph');
+  const svg = document.getElementById('links');
+  const log = document.getElementById('log');
+  const statusText = document.getElementById('statusText');
+  const conn = document.getElementById('conn');
+  const NS = 'http://www.w3.org/2000/svg';
+
+  const agents = new Map();   // name -> {el, pct, status, task}
+  let orc = null, runInfo = { backend: '', msgs: 0, summary: null };
+
+  // Event fields come from agents (LLM output, possibly prompt-injected): always escape.
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function makeNode(name, cls) {
+    const el = document.createElement('div');
+    el.className = 'node ' + cls;
+    el.innerHTML = `<div class="title">${esc(name)}</div>
+      <div class="body"><span class="task"></span><span class="spin">◌</span><span class="pct"></span></div>
+      <div class="bar"><i></i></div><div class="sub"></div>`;
+    graph.appendChild(el);
+    return el;
+  }
+
+  function ensureOrchestrator() {
+    if (orc) return orc;
+    orc = makeNode('orchestrator', 'orchestrator');
+    orc.querySelector('.bar').remove(); orc.querySelector('.spin').remove(); orc.querySelector('.pct').remove();
+    orc.querySelector('.task').textContent = 'you · 0 workers';
+    orc.querySelector('.sub').textContent = '● leading';
+    return orc;
+  }
+
+  function ensureAgent(name) {
+    if (!agents.has(name)) {
+      const el = makeNode(name, 'agent');
+      el.querySelector('.sub').remove();
+      agents.set(name, { el, pct: 0, status: 'pending', task: '' });
+      layout();
+    }
+    return agents.get(name);
+  }
+
+  function renderAgent(a) {
+    a.el.classList.remove('running', 'done', 'failed', 'conflict');
+    a.el.classList.add(a.status);
+    a.el.querySelector('.task').textContent = a.task || '—';
+    a.el.querySelector('.pct').textContent = a.pct + '%';
+    a.el.querySelector('.bar i').style.width = a.pct + '%';
+    a.el.querySelector('.spin').style.visibility = a.status === 'running' ? 'visible' : 'hidden';
+  }
+
+  // Positions: orchestrator in the centre, agents on an ellipse around it.
+  const pos = new Map();
+  function layout() {
+    const W = graph.clientWidth, H = graph.clientHeight;
+    const cx = W / 2, cy = H / 2;
+    ensureOrchestrator();
+    pos.set('orchestrator', [cx, cy]);
+    orc.style.left = cx + 'px'; orc.style.top = cy + 'px';
+    orc.querySelector('.task').textContent = `you · ${agents.size} workers`;
+    document.getElementById('nagents').textContent = agents.size;
+    const n = agents.size, rx = Math.min(W * 0.36, 420), ry = Math.min(H * 0.36, 260);
+    [...agents.keys()].forEach((name, i) => {
+      const t = -Math.PI / 2 + (2 * Math.PI * i) / n;
+      const x = cx + rx * Math.cos(t), y = cy + ry * Math.sin(t);
+      pos.set(name, [x, y]);
+      const el = agents.get(name).el;
+      el.style.left = x + 'px'; el.style.top = y + 'px';
+    });
+    // dotted links
+    svg.querySelectorAll('.link').forEach(l => l.remove());
+    for (const [name, [x, y]] of pos) {
+      if (name === 'orchestrator') continue;
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('class', 'link');
+      p.setAttribute('d', `M${x},${y} L${cx},${cy}`);
+      svg.prepend(p);
+    }
+  }
+  window.addEventListener('resize', layout);
+
+  // Animated packet travelling from source to target.
+  function packet(from, to) {
+    const a = pos.get(from), b = pos.get(to);
+    if (!a || !b) return;
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('class', 'packet ' + (to === 'orchestrator' ? 'up' : 'down'));
+    svg.appendChild(c);
+    const t0 = performance.now(), dur = 900;
+    (function step(t) {
+      const k = Math.min(1, (t - t0) / dur);
+      c.setAttribute('cx', a[0] + (b[0] - a[0]) * k);
+      c.setAttribute('cy', a[1] + (b[1] - a[1]) * k);
+      if (k < 1) requestAnimationFrame(step); else c.remove();
+    })(t0);
+  }
+
+  // First whole words of the prompt, up to ~16 chars, as the node label.
+  function shortLabel(s) {
+    const words = (s || '').replace(/[^\w\s-]/g, '').split(/\s+/).filter(Boolean);
+    let out = '';
+    for (const w of words) { if ((out + ' ' + w).trim().length > 16) break; out = (out + ' ' + w).trim(); }
+    return out || '—';
+  }
+
+  function fmtTs(ts) {
+    const d = new Date(ts * 1000);
+    return d.toTimeString().slice(3, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+
+  function addLog(e) {
+    const src = e.source, tgt = e.target || '·';
+    const row = document.createElement('div');
+    row.className = 'msg kind-' + e.kind;
+    const cls = n => n === 'orchestrator' ? 'orc' : '';
+    row.innerHTML = `<span class="ts">${fmtTs(e.ts)}</span>
+      <span><span class="src ${cls(src)}">${esc(src)}</span> <span class="arrow">${src === 'orchestrator' ? '⇉' : '→'}</span> <span class="tgt ${cls(tgt)}">${esc(tgt)}</span></span>
+      <span class="txt" title="${esc(e.message)}">${esc(e.kind)}: ${esc(e.message)}</span>`;
+    log.appendChild(row);
+    while (log.children.length > 300) log.firstChild.remove();
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setStatus() {
+    const n = agents.size;
+    let s;
+    if (runInfo.summary) {
+      const v = Object.values(runInfo.summary);
+      s = `<b>run finished</b> · ${v.filter(x => x === 'merged').length}/${v.length} merged`;
+    } else s = `<b>${n} agents</b> running (${esc(runInfo.backend || '?')} backend)`;
+    statusText.innerHTML = `${s} · ${runInfo.msgs} messages on the bus`;
+  }
+
+  function handle(e) {
+    runInfo.msgs++;
+    switch (e.kind) {
+      case 'run_start':
+        runInfo.backend = e.backend; runInfo.summary = null;
+        (e.workers || []).forEach(ensureAgent); break;
+      case 'start': { const a = ensureAgent(e.source); a.status = 'running'; a.task = shortLabel(e.message); renderAgent(a); break; }
+      case 'progress': { const a = ensureAgent(e.source); a.pct = e.progress ?? a.pct; renderAgent(a); break; }
+      case 'done': { const a = ensureAgent(e.source); a.status = 'done'; a.pct = 100; renderAgent(a); break; }
+      case 'failed': { const a = ensureAgent(e.source); a.status = 'failed'; renderAgent(a); break; }
+      case 'conflict': { const a = ensureAgent(e.target); a.status = 'conflict'; renderAgent(a); break; }
+      case 'run_end': runInfo.summary = e.summary; break;
+    }
+    if (e.target && e.kind !== 'progress') packet(e.source, e.target);
+    if (e.kind !== 'progress') addLog(e);   // progress is shown on the node, not in the log
+    setStatus();
+  }
+
+  // Agents can describe their work in the task prompt; show the first words as the label.
+  // Connect to the SSE stream.
+  const es = new EventSource('/events');
+  es.onopen = () => { conn.textContent = '● live'; conn.style.color = 'var(--green)'; };
+  es.onerror = () => { conn.textContent = '● reconnecting'; conn.style.color = 'var(--red)'; };
+  es.onmessage = ev => { try { handle(JSON.parse(ev.data)); } catch (err) { console.error(err); } };
+
+  ensureOrchestrator(); layout(); setStatus();
+})();
+</script>
+</body>
+</html>
