@@ -1,0 +1,7 @@
+events.jsonl
+__pycache__/
+.pytest_cache/
+.orchestra-*/
+.venv/
+.DS_Store
+.claude/
