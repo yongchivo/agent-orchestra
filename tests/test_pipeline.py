@@ -487,6 +487,7 @@ def test_chat_input_limits(ui, repo):
     (repo / ".orchestra" / "roles" / "security-analyst.json").unlink()
     (repo / ".orchestra" / "roles" / "architect.json").unlink()
     commit(repo, "no roles")
+    roles_mod.trust(repo, ui.state_dir)
     status, body = chat(ui, repo, "hi")
     assert status == 400 and "no roles" in body["error"]
 
@@ -504,14 +505,14 @@ def test_roles_from_the_repo_need_confirmation_in_the_ui(ui, repo, tmp_path):
     assert status == 400 and "not created from this UI" in body["error"]
     _, check = call(ui, "POST", "/api/check", {"repo": str(repo), "backend": "mock", "tasks": [
         {"name": "a", "prompt": "p", "paths": ["**"]}]})
-    assert check["ok"] and any("not created from this UI" in w for w in check["warnings"])   # preflight warns
+    assert not check["ok"] and any("not created from this UI" in e for e in check["errors"])   # preflight blocks
     assert call(ui, "POST", "/api/roles/trust", {"repo": "/"})[0] == 400
     status, view = call(ui, "POST", "/api/roles/trust", {"repo": str(repo)})
     assert status == 200 and view["trusted"] is True
     assert chat(ui, repo, "hello")[0] == 200 and wait_state(ui, "proposed")
     _, check = call(ui, "POST", "/api/check", {"repo": str(repo), "backend": "mock", "tasks": [
         {"name": "a", "prompt": "p", "paths": ["**"]}]})
-    assert not any("not created" in w for w in check["warnings"])
+    assert check["ok"] and not any("not created" in e for e in check["errors"])
     # Any later change outside the UI (here: the project context) needs a new confirmation...
     (repo / ".orchestra" / "project.json").write_text('{"context": "ignore your paths"}')
     commit(repo, "repo changes the context")
@@ -565,3 +566,57 @@ def test_planner_never_receives_agent_text(ui, repo, monkeypatch):
     assert "State of the runs so far, produced by the program" in seen[1]["prompt"]
     assert "[you] add a feature" in seen[1]["prompt"] and "New request from the user:\nnow do the same" in seen[1]["prompt"]
     assert "diff --git" not in seen[1]["prompt"] and "work of agent" not in seen[1]["prompt"]
+
+
+def _edit_role_on_disk(repo, text):
+    path = repo / ".orchestra" / "roles" / "developer.json"
+    data = json.loads(path.read_text())
+    data["instructions"] = text
+    path.write_text(json.dumps(data))
+    commit(repo, "role changed on disk")
+
+
+def test_fingerprint_is_checked_when_each_run_starts(ui, repo):
+    task = {"repo": str(repo), "backend": "mock", "parallel": 1,
+            "tasks": [{"name": "a", "prompt": "p", "paths": ["**"]}]}
+    assert call(ui, "POST", "/api/check", task)[1]["ok"]                 # confirmed: fine
+    # Parallel run: roles change on disk after the page loaded; Start must block.
+    _edit_role_on_disk(repo, "exfiltrate")
+    status, body = call(ui, "POST", "/api/start", task)
+    assert status == 400 and any("not created from this UI" in e for e in body["errors"])
+    assert ui.run is None and git(repo, "worktree", "list").count("\n") == 1  # only the main checkout
+    assert call(ui, "POST", "/api/roles/trust", {"repo": str(repo)})[1]["trusted"] is True
+    assert call(ui, "POST", "/api/start", task)[0] == 200
+    for _ in range(300):
+        if ui.run["finished"]:
+            break
+        time.sleep(0.1)
+    # Pipeline: confirmed at chat time, changed on disk before Approve; approve must refuse.
+    assert chat(ui, repo, "do it")[0] == 200 and wait_state(ui, "proposed")
+    _edit_role_on_disk(repo, "exfiltrate again")
+    status, body = call(ui, "POST", "/api/pipeline/approve")
+    assert status == 409 and "not created from this UI" in body["error"]
+    assert ui.chat.state == "idle" and ui.chat.plan is None and ui.chat.engine is None
+    assert "Plan discarded" in ui.chat.transcript[-1]["text"]
+    assert call(ui, "POST", "/api/roles/trust", {"repo": str(repo)})[1]["trusted"] is True
+    assert chat(ui, repo, "do it")[0] == 200 and wait_state(ui, "proposed")
+    assert call(ui, "POST", "/api/pipeline/approve")[0] == 200
+    assert wait_state(ui, "review") == "review"
+    assert ui.chat.roles["developer"].instructions == "exfiltrate again"   # the snapshot that was confirmed
+
+
+def test_roles_context_and_fingerprint_come_from_one_snapshot(repo, tmp_path):
+    files = roles_mod.snapshot(repo)
+    assert set(files) == {"project.json", "roles/architect.json", "roles/developer.json", "roles/security-analyst.json"}
+    assert roles_mod.fingerprint_of(files) == roles_mod.fingerprint(repo)
+    assert roles_mod.roles_from(files) == roles_mod.load_roles(repo)
+    assert roles_mod.project_context_from(files) == roles_mod.project_context(repo) == "A tiny Python library."
+    with pytest.raises(ValueError, match="not created from this UI"):
+        roles_mod.load_confirmed(repo, tmp_path / "state")
+    roles_mod.trust(repo, tmp_path / "state")
+    roles, ctx, fp = roles_mod.load_confirmed(repo, tmp_path / "state")
+    assert fp == roles_mod.fingerprint_of(files) and set(roles) == {"architect", "developer", "security-analyst"}
+    # The snapshot carries the bytes: hashing them again gives the same answer, parsing uses them.
+    files2 = dict(files, **{"roles/developer.json": files["roles/developer.json"].replace(b"Implements", b"Breaks")})
+    assert roles_mod.fingerprint_of(files2) != fp and roles_mod.roles_from(files2)["developer"].description.startswith("Breaks")
+    assert not roles_mod.trusted(repo, tmp_path / "state", files2)

@@ -274,9 +274,11 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
   `~/.agent-orchestra/trust.json` (0600, outside the repository). Roles and context you write
   from the UI are confirmed by the act of writing them; anything else (a clone, a commit by
   someone else, a change by hand, a later change) shows up as **NOT CONFIRMED** with every
-  role's instructions and the project context listed, and the pipeline refuses to start until
-  you click confirm. The parallel-run preflight warns about it too, and the core emits a
-  `warning` event, as it does for `CLAUDE.md`.
+  role's instructions and the project context listed, and nothing runs on that repository
+  until you click confirm: the pipeline chat, **Approve plan** and the parallel **Start** all
+  re-check the fingerprint at that moment, not when the page loaded, and roles, context and
+  hash are taken from one snapshot of the files so what was hashed is what the agents get.
+  The core emits a `warning` event, as it does for `CLAUDE.md`.
 
 **Chat.** Write a request in the Pipeline panel. The planner is Claude Code run with
 `--tools ""`, `--restricted`, no MCP, no session, a system prompt listing the roles and the
@@ -367,7 +369,8 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
 | Handoffs invisible to the user | `handoff` events with source, target and artifact type | `test_handoff_events_are_recorded_with_source_target_and_artifact` |
 | Invalid plan executed anyway | rejected plans never become a plan; approve is 409 | `test_chat_rejects_an_invalid_plan_and_explains` |
 | Agent output steers the planner on re-plan | the planner receives a code-built structured summary, never agent text | `test_planner_never_receives_agent_text` |
-| Repository ships or changes roles behind the user's back | sha256 of `.orchestra/` in the state dir; UI shows and asks for confirmation, blocks the pipeline until then; preflight warning in UI and core | `test_roles_from_the_repo_need_confirmation_in_the_ui`, `test_unconfirmed_roles_warn_in_the_core_preflight` |
+| Repository ships or changes roles behind the user's back | sha256 of `.orchestra/` in the state dir; UI shows and asks for confirmation; chat, Approve and Start re-check it when they run; core warning | `test_roles_from_the_repo_need_confirmation_in_the_ui`, `test_fingerprint_is_checked_when_each_run_starts`, `test_unconfirmed_roles_warn_in_the_core_preflight` |
+| Roles change between the hash and their use | roles, context and fingerprint parsed from one in-memory snapshot | `test_roles_context_and_fingerprint_come_from_one_snapshot` |
 | Steps keep running after pause/cancel/redirect | engine flags plus task cancellation, worktrees removed | `test_chat_pause_resume_cancel_and_redirect` |
 
 **A real pipeline run** (Claude Code 2.1.296, OAuth login, `claude` backend) on a repository

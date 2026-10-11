@@ -73,18 +73,33 @@ def roles_dir(repo):
     return Path(repo) / DIR / "roles"
 
 
-def load_roles(repo):
-    """{name: Role} from .orchestra/roles/*.json. Any invalid file is an error naming it."""
+def snapshot(repo):
+    """Every file under .orchestra/ read once: {relative path: bytes}. Roles, context and the
+    fingerprint are all taken from this same dict, so what is hashed is what is used."""
+    root = Path(repo) / DIR
+    if not root.is_dir():
+        return {}
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def roles_from(files):
+    """{name: Role} from a snapshot. Any invalid file is an error naming it."""
     out = {}
-    for path in sorted(roles_dir(repo).glob("*.json")):
+    for rel, data in files.items():
+        if not (rel.startswith("roles/") and rel.endswith(".json") and rel.count("/") == 1):
+            continue
         try:
-            role = role_from_json(json.loads(path.read_text(encoding="utf-8")))
-        except (ValueError, OSError) as exc:
-            raise ValueError(f"{DIR}/roles/{path.name}: {exc}") from exc
-        if role.name != path.stem:
-            raise ValueError(f"{DIR}/roles/{path.name}: file name and role name differ")
+            role = role_from_json(json.loads(data.decode("utf-8")))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError(f"{DIR}/{rel}: {exc}") from exc
+        if role.name != rel[len("roles/"):-len(".json")]:
+            raise ValueError(f"{DIR}/{rel}: file name and role name differ")
         out[role.name] = role
     return out
+
+
+def load_roles(repo):
+    return roles_from(snapshot(repo))
 
 
 def save_role(repo, role):
@@ -102,17 +117,21 @@ def delete_role(repo, name):
     path.unlink()
 
 
-def project_context(repo):
-    path = Path(repo) / DIR / "project.json"
-    if not path.is_file():
+def project_context_from(files):
+    data = files.get("project.json")
+    if data is None:
         return ""
     try:
-        ctx = json.loads(path.read_text(encoding="utf-8")).get("context", "")
-    except (ValueError, AttributeError, OSError) as exc:
+        ctx = json.loads(data.decode("utf-8")).get("context", "")
+    except (ValueError, AttributeError, UnicodeDecodeError) as exc:
         raise ValueError(f"{DIR}/project.json: {exc}") from exc
     if not isinstance(ctx, str):
         raise ValueError(f"{DIR}/project.json: 'context' must be a string")
     return ctx[:MAX_CONTEXT]
+
+
+def project_context(repo):
+    return project_context_from(snapshot(repo))
 
 
 def save_project_context(repo, text):
@@ -190,16 +209,18 @@ def uncommitted(repo, git):
 # only uses roles and a project context the user created there or explicitly confirmed; the
 # fingerprint lives in the state directory, outside the repository.
 
-def fingerprint(repo):
-    """sha256 over every file under .orchestra/ (relative path and bytes), or "" when absent."""
-    root = Path(repo) / DIR
-    if not root.is_dir():
+def fingerprint_of(files):
+    """sha256 over a snapshot (relative path and bytes), or "" when there is nothing."""
+    if not files:
         return ""
     h = hashlib.sha256()
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        h.update(str(path.relative_to(root)).encode("utf-8") + b"\0")
-        h.update(path.read_bytes() + b"\0")
+    for rel in sorted(files):
+        h.update(rel.encode("utf-8") + b"\0" + files[rel] + b"\0")
     return h.hexdigest()
+
+
+def fingerprint(repo):
+    return fingerprint_of(snapshot(repo))
 
 
 def _trust_path(state_dir):
@@ -214,10 +235,19 @@ def _trust_load(state_dir):
         return {}
 
 
-def trusted(repo, state_dir):
+def trusted(repo, state_dir, files=None):
     """True when .orchestra/ is absent or matches what the user last confirmed."""
-    fp = fingerprint(repo)
+    fp = fingerprint_of(snapshot(repo) if files is None else files)
     return fp == "" or _trust_load(state_dir).get(str(Path(repo).resolve())) == fp
+
+
+def load_confirmed(repo, state_dir):
+    """(roles, project context, fingerprint) from ONE snapshot, only if that very snapshot is
+    the one the user confirmed. Raises ValueError(UNCONFIRMED) otherwise."""
+    files = snapshot(repo)
+    if not trusted(repo, state_dir, files):
+        raise ValueError(UNCONFIRMED)
+    return roles_from(files), project_context_from(files), fingerprint_of(files)
 
 
 def trust(repo, state_dir):

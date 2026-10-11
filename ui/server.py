@@ -151,6 +151,7 @@ class Chat:
         self.result = self.error = None
         self.offset = 0
         self.history = []            # pipeline.state_summary() per finished run, for re-planning
+        self.fingerprint = None      # the .orchestra/ snapshot the loaded roles came from
 
     def say(self, who, text):
         self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
@@ -192,14 +193,14 @@ class Chat:
         iters = body.get("max_iterations", pipeline.DEFAULT_ITERATIONS)
         if not isinstance(iters, int) or isinstance(iters, bool) or not 1 <= iters <= pipeline.MAX_ITERATIONS:
             raise ValueError(f"max_iterations must be an integer 1..{pipeline.MAX_ITERATIONS}")
-        roles = roles_mod.load_roles(repo)
+        # Roles, context and fingerprint come from one snapshot of .orchestra/: what was
+        # hashed is what the agents get. Checked again at approve(), right before the run.
+        roles, context, fp = roles_mod.load_confirmed(repo, self.srv.state_dir)
         if not roles:
             raise ValueError("the repository has no roles: install the templates or create one first")
-        if not roles_mod.trusted(repo, self.srv.state_dir):
-            raise ValueError(roles_mod.UNCONFIRMED)
         self.__init__(self.srv)
         self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
-        self.roles, self.project_context = roles, roles_mod.project_context(repo)
+        self.roles, self.project_context, self.fingerprint = roles, context, fp
         self.srv.remember_repo(repo)
 
     def _plan(self, request):
@@ -232,6 +233,13 @@ class Chat:
             return 409, {"error": "there is no plan waiting for approval"}
         if self.srv.running():
             return 409, {"error": "a run is already in progress"}
+        # .orchestra/ may have changed on disk since the roles were loaded: the run uses the
+        # loaded roles, so it must still be exactly the confirmed snapshot.
+        if (roles_mod.fingerprint(self.repo) != self.fingerprint
+                or not roles_mod.trusted(self.repo, self.srv.state_dir)):
+            self.plan, self.state = None, ("review" if self.branch else "idle")
+            self.say("orchestrator", "Plan discarded: " + roles_mod.UNCONFIRMED)
+            return 409, {"error": roles_mod.UNCONFIRMED, "state": self.state}
         summary, steps = self.plan
         self.offset = self.srv.events_path.stat().st_size if self.srv.events_path.exists() else 0
         self.engine = pipeline.Pipeline(
@@ -421,7 +429,7 @@ class UIServer(ThreadingHTTPServer):
                 errors.append(str(exc))
             info["steering"] = worktree.agent_instruction_files(repo)
             if not roles_mod.trusted(repo, self.state_dir):
-                warnings.append(roles_mod.UNCONFIRMED)
+                errors.append(roles_mod.UNCONFIRMED)  # evaluated again inside start(), under the lock
         backend = body.get("backend", "mock")
         if backend not in BACKENDS:
             errors.append(f"backend must be one of {list(BACKENDS)}")
