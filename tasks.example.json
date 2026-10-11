@@ -1,17 +1,23 @@
 [
   {
     "name": "billing",
-    "prompt": "Port the billing module from Python to Rust under rust/billing. Keep the public API. Commit your work.",
+    "prompt": "Port the billing module from Python to Rust under rust/billing. Keep the public API.",
+    "paths": ["rust/billing/**", "billing.txt"],
+    "preset": "edit",
     "max_turns": 25
   },
   {
     "name": "queue",
-    "prompt": "Port the queue module from Python to Rust under rust/queue. Keep the public API. Commit your work.",
+    "prompt": "Port the queue module from Python to Rust under rust/queue. Keep the public API.",
+    "paths": ["rust/queue/**", "queue.txt"],
+    "preset": "edit",
     "max_turns": 25
   },
   {
     "name": "notify",
-    "prompt": "Port the notify module from Python to Rust under rust/notify. Keep the public API. Commit your work.",
+    "prompt": "Port the notify module from Python to Rust under rust/notify. Keep the public API.",
+    "paths": ["rust/notify/**", "notify.txt"],
+    "preset": "edit",
     "max_turns": 25
   }
 ]

@@ -1,22 +1,31 @@
+"""One test per security control. See README "Threat model" for the risk -> control map."""
 import ast
 import asyncio
 import json
+import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pytest
 
-from orchestra import orchestrator
+from orchestra import orchestrator, scope, worktree
 from orchestra.bus import EventBus
-from orchestra.worker import DEFAULT_TOOLS, Task, Worker
+from orchestra.worker import (DENIED_TOOLS, MAX_TURNS, PRESETS, Task, Worker, agent_env,
+                              agent_settings, write_agent_config)
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def git(repo, *args):
+    """Plain git, without the orchestrator's safety flags (used to set traps and to verify)."""
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True, check=True).stdout
 
@@ -25,53 +34,196 @@ def git(repo, *args):
 def repo(tmp_path):
     path = tmp_path / "repo"
     path.mkdir()
-    git(path, "init", "-q")
+    git(path, "init", "-q", "-b", "main")
     git(path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+    git(path, "checkout", "-q", "-b", "work")  # the orchestrator refuses main/master
     return path
 
 
-def run(repo, tasks, events):
-    return asyncio.run(orchestrator.run(repo, tasks, EventBus(events), backend="mock"))
+def T(name, paths=("**",), **kw):
+    return Task(name, f"do {name}", list(paths), **kw)
 
+
+def run(repo, tasks, events, **kw):
+    kw.setdefault("state_dir", Path(events).parent / "state")
+    return asyncio.run(orchestrator.run(repo, tasks, EventBus(events), backend="mock", **kw))
+
+
+def events_of(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_dashboard(events, *extra):
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, "-u", str(ROOT / "dashboard" / "server.py"),
+                             "--events", str(events), "--port", str(port), *extra],
+                            stdout=subprocess.PIPE, text=True)
+    banner = proc.stdout.readline()
+    assert banner.startswith(f"dashboard: http://127.0.0.1:{port}"), banner
+    return proc, f"http://127.0.0.1:{port}"
+
+
+# --- core flow -------------------------------------------------------------------------
 
 def test_mock_run_merges_every_agent_twice(repo, tmp_path):
     events = tmp_path / "events.jsonl"
-    tasks = [Task("alpha", "do a"), Task("beta", "do b")]
+    tasks = [T("alpha"), T("beta")]
 
     for _ in range(2):  # the second run must also produce real merges
         assert run(repo, tasks, events) == {"alpha": "merged", "beta": "merged"}
 
-    merges = git(repo, "log", "--merges", "--oneline").splitlines()
-    assert len(merges) == 4
+    assert len(git(repo, "log", "--merges", "--oneline").splitlines()) == 4
     assert len((repo / "alpha.txt").read_text().splitlines()) == 2
-    # Worktrees and the scratch directory are cleaned up.
     assert git(repo, "worktree", "list").count("\n") == 1
-    assert not list(tmp_path.glob(".orchestra-*"))
+    assert not list((tmp_path / "state" / "worktrees").iterdir())
 
-    kinds = [json.loads(line)["kind"] for line in events.read_text().splitlines()]
+    kinds = [e["kind"] for e in events_of(events)]
     assert kinds.count("merge") == 4 and kinds[-1] == "run_end"
 
 
 @pytest.mark.parametrize("name", ["../evil", "a/b", "Upper", "-lead", "", "x" * 33])
 def test_invalid_task_names_are_rejected(name):
     with pytest.raises(ValueError, match="invalid task name"):
-        Task(name, "prompt")
+        T(name)
 
 
 def test_duplicate_task_names_are_rejected(repo, tmp_path):
     with pytest.raises(ValueError, match="unique"):
-        run(repo, [Task("dup", "a"), Task("dup", "b")], tmp_path / "events.jsonl")
-    assert not list(tmp_path.glob(".orchestra-*"))
+        run(repo, [T("dup"), T("dup")], tmp_path / "events.jsonl")
 
 
-# --- security claims: each one has a test below -------------------------------------
+def test_hard_limits(repo, tmp_path):
+    with pytest.raises(ValueError, match="max_turns"):
+        T("x", max_turns=MAX_TURNS + 1)
+    with pytest.raises(ValueError, match="tasks per run"):
+        run(repo, [T(f"t{i}") for i in range(orchestrator.MAX_TASKS + 1)], tmp_path / "e.jsonl")
+    with pytest.raises(ValueError, match="--parallel"):
+        run(repo, [T("a")], tmp_path / "e.jsonl", max_parallel=orchestrator.MAX_PARALLEL + 1)
 
-ROOT = Path(__file__).resolve().parents[1]
+
+# --- 1. agent permissions ----------------------------------------------------------------
+
+def test_bash_is_never_available(tmp_path):
+    for tools in PRESETS.values():
+        assert "Bash" not in tools and not any(t.startswith("Bash(") for t in tools)
+    with pytest.raises(ValueError, match="preset"):
+        T("x", preset="shell")
+    cmd = Worker(T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=tmp_path).command(env={})
+    assert "--restricted" in cmd
+    assert cmd[cmd.index("--tools") + 1] == ",".join(PRESETS["edit"])
+    assert cmd[cmd.index("--allowedTools") + 1] == ",".join(PRESETS["edit"])
+    denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
+    assert {"Bash", "WebFetch", "WebSearch", "mcp__*"} <= set(denied) == set(DENIED_TOOLS)
+    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    assert cmd[cmd.index("--permission-prompts") + 1] == "none"
+    assert "--no-session-persistence" in cmd and "--disable-slash-commands" in cmd
+    assert "--bare" not in cmd and "--bare" in Worker(
+        T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=tmp_path
+    ).command(env={"ANTHROPIC_API_KEY": "x"})
+
+
+def test_mcp_servers_and_repo_settings_are_disabled(tmp_path):
+    run_dir = tmp_path / "cfg"
+    write_agent_config(run_dir)
+    w = Worker(T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=run_dir)
+    cmd = w.command(env={})
+    assert "--strict-mcp-config" in cmd
+    assert json.loads(Path(cmd[cmd.index("--mcp-config") + 1]).read_text()) == {"mcpServers": {}}
+    settings = json.loads(Path(cmd[cmd.index("--settings") + 1]).read_text())
+    assert settings == agent_settings()
+    assert settings["disableAllHooks"] is True
+    deny = settings["permissions"]["deny"]
+    for rule in ("Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/gh/**)",
+                 "Read(~/.gnupg/**)", "Read(~/Library/Keychains/**)", "Read(//**/.env*)", "Bash"):
+        assert rule in deny
+    assert settings["sandbox"]["enabled"] is True
+    for name in ("settings.json", "mcp.json"):
+        assert stat.S_IMODE((run_dir / name).stat().st_mode) == 0o600
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+# --- 2. subprocess environment -----------------------------------------------------------
+
+def test_agent_env_is_an_allowlist():
+    env = agent_env({
+        "PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm", "ANTHROPIC_API_KEY": "k",
+        "GITHUB_TOKEN": "ghp_x", "AWS_SECRET_ACCESS_KEY": "s", "OPENAI_API_KEY": "o",
+        "CLAUDECODE": "1", "CLAUDE_CODE_SIMPLE": "1", "SSH_AUTH_SOCK": "/s",
+    })
+    assert env == {"PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm",
+                   "ANTHROPIC_API_KEY": "k"}
+
+
+# --- 3. limits: wall-clock timeout kills the whole process group -------------------------
+
+def test_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
+    # The "agent" spawns a grandchild and sleeps: both must be gone after the timeout.
+    script = "import subprocess, time; subprocess.Popen(['sleep', '300']); time.sleep(300)"
+    monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
+    events = tmp_path / "e.jsonl"
+    w = Worker(T("slow"), tmp_path, "b", EventBus(events), backend="claude", timeout=0.5,
+               config_dir=tmp_path)
+    t0 = time.monotonic()
+    assert asyncio.run(w.run()) == "failed"
+    assert time.monotonic() - t0 < 10
+    assert any(e["kind"] == "failed" and "timeout" in e["message"] for e in events_of(events))
+    for _ in range(40):  # the orphaned grandchild is reaped asynchronously by init
+        try:
+            os.killpg(w.proc.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("process group still alive")
+
+
+# --- 4. git ------------------------------------------------------------------------------
+
+def test_git_hooks_and_fsmonitor_never_run(repo, tmp_path):
+    marker = tmp_path / "HOOK_RAN"
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    for name in ("post-checkout", "pre-commit", "post-commit", "pre-merge-commit", "post-merge"):
+        (hooks / name).write_text(f"#!/bin/sh\ntouch {marker}\n")
+        (hooks / name).chmod(0o755)
+    git(repo, "config", "core.hooksPath", str(hooks))
+    git(repo, "config", "core.fsmonitor", str(hooks / "post-checkout"))
+
+    assert run(repo, [T("a")], tmp_path / "e.jsonl") == {"a": "merged"}
+    assert not marker.exists()
+
+    # Control: the trap does fire for plain git, so the test proves the override works.
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
+    assert marker.exists()
+
+
+def test_preflight_rejects_dirty_tree_and_main(repo, tmp_path):
+    (repo / "dirty.txt").write_text("x")
+    with pytest.raises(RuntimeError, match="uncommitted"):
+        run(repo, [T("a")], tmp_path / "e.jsonl")
+    (repo / "dirty.txt").unlink()
+    git(repo, "checkout", "-q", "main")
+    with pytest.raises(RuntimeError, match="refusing to run on 'main'"):
+        run(repo, [T("a")], tmp_path / "e.jsonl")
+    assert not (tmp_path / "state" / "worktrees").exists() or \
+        not list((tmp_path / "state" / "worktrees").iterdir())
+
+
+def test_worktrees_live_in_the_state_dir(repo, tmp_path):
+    run(repo, [T("a")], tmp_path / "e.jsonl", keep_worktrees=True)
+    runs = list((tmp_path / "state" / "worktrees").iterdir())
+    assert len(runs) == 1 and (runs[0] / "a" / "a.txt").exists()
+    assert not [p for p in repo.parent.iterdir() if p.name.startswith(".orchestra")]
 
 
 def test_each_agent_commits_only_in_its_own_worktree(repo, tmp_path):
-    """Isolation: an agent's commit touches only its own files and is authored as that agent."""
-    run(repo, [Task("alpha", "a"), Task("beta", "b")], tmp_path / "ev.jsonl")
+    run(repo, [T("alpha"), T("beta")], tmp_path / "ev.jsonl")
     for name in ("alpha", "beta"):
         branch = git(repo, "for-each-ref", "--format=%(refname:short)",
                      f"refs/heads/agent/*/{name}").strip()
@@ -80,64 +232,146 @@ def test_each_agent_commits_only_in_its_own_worktree(repo, tmp_path):
 
 
 def test_merge_conflict_is_attributed_to_one_agent_and_aborted(repo, tmp_path, monkeypatch):
-    """Serialised merges: the second agent to touch a file conflicts; main is never left half-merged."""
     async def clash(self):
         (self.workdir / "shared.txt").write_text(f"{self.name}\n")
     monkeypatch.setattr(Worker, "_run_mock", clash)
 
     events = tmp_path / "ev.jsonl"
-    assert run(repo, [Task("first", "a"), Task("second", "b")], events) == \
-        {"first": "merged", "second": "conflict"}
+    assert run(repo, [T("first"), T("second")], events) == {"first": "merged", "second": "conflict"}
     assert (repo / "shared.txt").read_text() == "first\n"
     assert git(repo, "status", "--porcelain") == ""
     assert not (repo / ".git" / "MERGE_HEAD").exists()
-    conflicts = [json.loads(l) for l in events.read_text().splitlines()]
-    assert [e["target"] for e in conflicts if e["kind"] == "conflict"] == ["second"]
+    assert [e["target"] for e in events_of(events) if e["kind"] == "conflict"] == ["second"]
 
 
-def test_claude_command_is_least_privilege(tmp_path):
-    cmd = Worker(Task("x", "do it"), tmp_path, "b", EventBus(tmp_path / "e.jsonl")).command()
-    assert cmd[:2] == ["claude", "-p"]
-    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
-    tools = cmd[cmd.index("--allowedTools") + 1].split(",")
-    assert tools == DEFAULT_TOOLS
-    assert "Bash" not in tools and "Bash(git *)" in tools  # git only, no unrestricted shell
+def test_cleanup_after_an_exception(repo, tmp_path, monkeypatch):
+    def boom(repo, branch):
+        raise RuntimeError("merge exploded")
+    monkeypatch.setattr(worktree, "merge", boom)
+    with pytest.raises(RuntimeError, match="merge exploded"):
+        run(repo, [T("a")], tmp_path / "e.jsonl")
+    assert git(repo, "worktree", "list").count("\n") == 1
+    assert not list((tmp_path / "state" / "worktrees").iterdir())
+    assert events_of(tmp_path / "e.jsonl")[-1]["kind"] == "failed"
+
+
+# --- 5. merge scope gate -----------------------------------------------------------------
+
+def test_change_outside_task_paths_is_not_merged(repo, tmp_path):
+    events = tmp_path / "e.jsonl"
+    assert run(repo, [T("a", paths=["docs/**"])], events) == {"a": "out_of_scope"}
+    assert not (repo / "a.txt").exists()
+    blocked = [e for e in events_of(events) if e["kind"] == "out_of_scope"]
+    assert blocked[0]["target"] == "a" and "a.txt" in blocked[0]["message"]
+
+
+@pytest.mark.parametrize("path", ["Makefile", "deploy.sh", "sub/package.json", ".github/workflows/x.yml",
+                                  "CLAUDE.md", ".gitignore", "requirements-dev.txt", "Dockerfile"])
+def test_protected_path_needs_review_even_when_in_scope(repo, tmp_path, monkeypatch, path):
+    async def write_protected(self):
+        target = self.workdir / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    monkeypatch.setattr(Worker, "_run_mock", write_protected)
+    assert run(repo, [T("a", paths=["**"])], tmp_path / "e.jsonl") == {"a": "needs_review"}
+    assert not (repo / path).exists()
+
+
+def test_symlink_and_large_binary_need_review(repo, tmp_path, monkeypatch):
+    async def sneaky(self):
+        os.symlink("/etc/passwd", self.workdir / "link")
+        (self.workdir / "blob.bin").write_bytes(b"\0\xff" * (scope.MAX_NEW_BINARY_BYTES // 2 + 1))
+    monkeypatch.setattr(Worker, "_run_mock", sneaky)
+    events = tmp_path / "e.jsonl"
+    assert run(repo, [T("a")], events) == {"a": "needs_review"}
+    msg = [e for e in events_of(events) if e["kind"] == "needs_review"][0]["message"]
+    assert "link (symlink)" in msg and "blob.bin (new binary" in msg
+
+
+def test_glob_matching_is_segment_aware():
+    assert scope.in_scope("src/a/b.py", ["src/**"]) and scope.in_scope("src/a.py", ["src/*.py"])
+    assert not scope.in_scope("src/a/b.py", ["src/*.py"])
+    assert scope.in_scope("README.md", ["*.md"]) and not scope.in_scope("docs/x.md", ["*.md"])
+    assert scope.is_protected("a/b/.claude/settings.json") and not scope.is_protected("src/main.py")
+
+
+# --- 6. event log ------------------------------------------------------------------------
+
+def test_secrets_are_redacted_and_messages_truncated(tmp_path):
+    bus = EventBus(tmp_path / "e.jsonl")
+    bus.emit("a", "say", "token ghp_" + "a" * 36 + " key sk-ant-" + "b" * 20 + " " + "x" * 2000,
+             extra={"aws": "AKIAABCDEFGHIJKLMNOP", "pem": "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----"})
+    raw = (tmp_path / "e.jsonl").read_text()
+    for secret in ("ghp_", "sk-ant-", "AKIA", "BEGIN RSA"):
+        assert secret not in raw
+    assert raw.count("[REDACTED]") == 4
+    assert len(json.loads(raw)["message"]) <= 500
+
+
+def test_log_and_state_dir_permissions(repo, tmp_path):
+    events = tmp_path / "e.jsonl"
+    events.write_text("")
+    events.chmod(0o644)  # pre-existing, too open
+    run(repo, [T("a")], events)
+    assert stat.S_IMODE(events.stat().st_mode) == 0o600
+    for d in (tmp_path / "state", tmp_path / "state" / "worktrees"):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
+def test_log_rotates_by_size(tmp_path):
+    bus = EventBus(tmp_path / "e.jsonl", max_bytes=300)
+    for i in range(10):
+        bus.emit("a", "say", "m" * 50)
+    assert (tmp_path / "e.jsonl.1").exists()
+    assert (tmp_path / "e.jsonl").stat().st_size < 300
+
+
+# --- 7. dashboard server -----------------------------------------------------------------
+
+def test_dashboard_serves_only_the_allowlist(tmp_path):
+    proc, base = start_dashboard(tmp_path / "e.jsonl")
+    try:
+        with urllib.request.urlopen(base + "/", timeout=5) as r:
+            assert r.status == 200 and b"const esc" in r.read()
+            assert "default-src 'none'" in r.headers["Content-Security-Policy"]
+        for path in ("/server.py", "/../main.py", "/index.html/../server.py", "/%2e%2e/main.py", "/favicon.ico"):
+            with pytest.raises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(base + path, timeout=5)
+            assert err.value.code == 404, path
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_sse_connections_are_capped(tmp_path):
+    events = tmp_path / "e.jsonl"
+    events.write_text('{"kind": "say", "source": "a", "message": "<b>x</b>"}\nnot json\n')
+    proc, base = start_dashboard(events, "--max-clients", "1")
+    try:
+        first = urllib.request.urlopen(base + "/events", timeout=5)
+        assert first.readline() == b'data: {"kind": "say", "source": "a", "message": "<b>x</b>"}\n'
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(base + "/events", timeout=5)
+        assert err.value.code == 503
+        first.close()
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's JS")
 def test_dashboard_escapes_xss_payload():
-    """Untrusted output: the page's own esc() neutralises an injected payload."""
     html = (ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
     esc_src = re.search(r"const esc = .*;", html).group(0)
     payload = "<img src=x onerror=alert(1)>\"'&"
     out = subprocess.run(["node", "-e", f"{esc_src} process.stdout.write(esc({json.dumps(payload)}))"],
                          capture_output=True, text=True, check=True).stdout
     assert out == "&lt;img src=x onerror=alert(1)&gt;&quot;&#39;&amp;"
-    # Every event field interpolated into innerHTML goes through esc().
     for field in ("name", "src", "tgt", "e.kind", "e.message", "runInfo.backend"):
         assert f"${{esc({field}" in html
 
 
-def test_dashboard_server_binds_locally_and_streams_events(tmp_path):
-    """Local by default: the server announces 127.0.0.1 and forwards only valid JSON lines."""
-    events = tmp_path / "ev.jsonl"
-    events.write_text('{"kind": "say", "source": "a", "message": "<b>x</b>"}\nnot json\n')
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    proc = subprocess.Popen([sys.executable, "-u", str(ROOT / "dashboard" / "server.py"),
-                             "--events", str(events), "--port", str(port)],
-                            stdout=subprocess.PIPE, text=True)
-    try:
-        assert proc.stdout.readline().startswith(f"dashboard: http://127.0.0.1:{port}")
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/events", timeout=5) as r:
-            assert r.readline() == b'data: {"kind": "say", "source": "a", "message": "<b>x</b>"}\n'
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
-            assert b"const esc" in r.read()
-    finally:
-        proc.kill()
-        proc.wait()
-
+# --- project -----------------------------------------------------------------------------
 
 def test_runtime_uses_only_the_standard_library():
     for path in [ROOT / "main.py", ROOT / "dashboard" / "server.py", *ROOT.glob("orchestra/*.py")]:
