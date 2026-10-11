@@ -40,6 +40,9 @@ git -C /tmp/demo log --oneline --graph
 
 Requires Python 3.10+ and git. No third-party runtime dependencies.
 
+Prefer a browser? `python start.py` opens a local control page that does the same without
+the terminal: see [Using the UI](#using-the-ui).
+
 For a real run, install and log in to the [Claude Code CLI](https://code.claude.com/docs/en/overview),
 check out a feature branch in the target repository, then:
 
@@ -66,6 +69,7 @@ tasks.json ──> orchestrator ──> worktree + branch per agent ──> `cla
 | `orchestra/worker.py` | Runs one agent (`claude` or `mock` backend) in a locked-down subprocess |
 | `orchestra/orchestrator.py` | Preflight, limits, parallelism, gate, merge phase, cleanup |
 | `main.py` | CLI |
+| `ui/server.py`, `ui/app.js`, `start.py` | Local control UI: loopback-only, token-guarded, launches and reviews runs |
 | `dashboard/server.py` | Serves the dashboard and tails `events.jsonl` over SSE (stdlib only) |
 | `dashboard/index.html` | Live view: orchestrator in the centre, one node per agent, message bus below |
 
@@ -114,6 +118,79 @@ python dashboard/server.py --events events.jsonl --port 8765
 Open http://127.0.0.1:8765. Nodes turn green when an agent's branch merges, red on failure or
 merge conflict. The page is vanilla HTML/JS with no dependencies. `--host 0.0.0.0` exposes it on
 the network; it has no authentication, so only do that on a trusted LAN.
+
+## Using the UI
+
+```bash
+python start.py            # binds 127.0.0.1:8766, opens the browser with a one-time token
+```
+
+The page is a thin client: every rule is checked by the server, the page only shows the
+result. It invokes the same core as the CLI and never relaxes a control.
+
+![New run form](docs/ui-form.jpg)
+
+**New run**: repository path (typed, with a list of recent repositories), backend, parallelism
+and a task editor where each task has a name, prompt, `max_turns`, a permission preset
+(`readonly` or `edit`, the core's presets, never free-text tools) and a required `paths` list.
+Templates are saved under `~/.agent-orchestra/runs/<name>.json` and validated with the same
+schema when loaded. Before Start the server reports:
+
+- blocking errors: dirty tree, `main`/`master` checked out (with a "Create branch
+  `orchestra-run-<date>`" button that checks it out after you confirm), invalid tasks,
+  repository outside the allowed roots, a run already in progress;
+- warnings: overlapping `paths` between tasks (possible merge conflict), a prompt that names
+  none of its `paths`, more than 3 agents or `max_turns` above 20 on the `claude` backend;
+- the agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`) the repository tracks.
+
+![Run in progress](docs/ui-running.jpg)
+
+**Run**: one card per agent with live progress and the message bus underneath, streamed with
+`fetch()` so the token travels in a header. Stop kills every agent's process group.
+
+![Results](docs/ui-results.jpg)
+
+**Results**: per agent, the gate verdict (`merged`, `out_of_scope`, `needs_review`, `conflict`,
+`failed`), the files and the reason, and the diff of its branch rendered as plain text. For
+anything the gate rejected there is no merge button, by design: the page shows the exact
+`git diff` and `git merge` commands to review and merge by hand. **Publish** opens
+`github.com/new` with the folder name pre-filled and gives you the `gh repo create` command to
+paste; the UI never pushes or runs `gh`.
+
+**UI security** (single user, this machine only)
+
+- Loopback only: the server refuses to bind to anything but `127.0.0.1`/`localhost`.
+- A random token per start (`secrets.token_urlsafe(32)`) is required on every API call and
+  the event stream, in the `X-Orchestra-Token` header, never in a cookie or a query string,
+  compared with `hmac.compare_digest`. `start.py` passes it in the URL fragment, the page keeps
+  it in memory and cleans the URL; a copy lives in `~/.agent-orchestra/token` (0600).
+- `Host` and `Origin` must match `http://127.0.0.1:<port>` or `localhost`: anything else is
+  403, which stops CSRF from other sites and DNS rebinding.
+- POST bodies must be `application/json` and at most 64 KB.
+- The repository must exist, be the root of a git repository and sit under an allowed root
+  (your home by default) after resolving symlinks.
+- Everything from agents, diffs or files is rendered with `textContent`; the page has no
+  inline script and a CSP of `default-src 'none'; script-src 'self'` plus
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `nosniff` and `no-store`.
+- The server exits after 2 hours without requests (`--idle-timeout`).
+
+| Risk | Control | Test (`tests/test_ui.py`) |
+|------|---------|---------------------------|
+| Another site in the browser calls the API | token header required; `Origin`/`Host` checks | `test_missing_token_is_rejected`, `test_forged_origin_is_rejected`, `test_forged_host_is_rejected` |
+| Token leaks through a URL or log | fragment only, cleaned on load; query-string tokens ignored | `test_token_in_query_string_is_ignored` |
+| Guessing the token | 256-bit random, constant-time compare | `test_wrong_token_is_rejected` |
+| Event stream read without auth | same token on `/api/events` | `test_event_stream_without_token_is_rejected` |
+| Form-encoded CSRF or huge body | JSON only, 64 KB cap | `test_post_without_json_content_type_is_rejected`, `test_oversized_body_is_rejected` |
+| Pointing the orchestrator at an arbitrary directory | allowed roots after `realpath`, git root check | `test_repo_outside_allowed_roots_is_rejected`, `test_symlink_escaping_the_roots_is_rejected` |
+| Widening agent permissions from the page | presets only, unknown task fields rejected | `test_invalid_preset_is_rejected`, `test_task_without_paths_is_rejected` |
+| Template name traversal or tampered template | name regex, same schema on load, 0600 | `test_template_name_traversal_is_rejected`, `test_templates_roundtrip_and_recent_repos` |
+| Two runs on one repository | one run at a time (409) | `test_second_simultaneous_run_is_refused` |
+| Running on a dirty tree or on main | server-side preflight, branch helper | `test_dirty_tree_blocks_start`, `test_main_branch_blocks_start_until_a_branch_is_created` |
+| Exposure on the network | loopback-only bind | `test_non_loopback_host_is_refused` |
+| Another local user reads the token | 0600 file, 0700 state dir | `test_token_file_is_private` |
+| XSS through a diff or event | `textContent` only, CSP without inline script, security headers | `test_full_mock_flow_with_out_of_scope_and_xss_diff`, `test_security_headers_and_no_inline_script` |
+| Forgotten server | idle auto-shutdown | `test_idle_timeout_shuts_the_server_down` |
+| Runaway run | Stop kills process groups and cleans worktrees | `test_stop_cancels_the_run_and_cleans_up` |
 
 ## Security controls
 
@@ -208,8 +285,9 @@ on the branch), the user's Anthropic quota, and the event log.
 | Malicious target repository | Run code through git hooks, `.claude/settings.json` hooks, `.mcp.json`, skills | hooks disabled on every git call; `--restricted` ignores repo settings; `--strict-mcp-config`; `--disable-slash-commands`; `--bare` with API-key auth |
 | Prompt-injected agent | Read `~/.ssh` or `.env`, exfiltrate, run commands, edit CI or build files, write outside its task | no Bash/WebFetch/WebSearch/MCP; file tools confined to the worktree plus deny rules; merge gate (`paths`, protected files, symlinks); timeout and turn cap |
 | Malicious web content | Reach the agent through fetched pages | WebFetch and WebSearch removed |
-| Another device on the network | Read the dashboard or the event stream | dashboard bound to 127.0.0.1; SSE client cap |
-| Another user of the Mac | Read worktrees, agent config or the log | state dir 0700, config and log 0600 |
+| Another device on the network | Reach the dashboard, the event stream or the control UI | dashboard and UI bound to 127.0.0.1 only (the UI refuses any other host); SSE client cap |
+| Another user of the Mac | Read worktrees, agent config, the log or the UI token; drive the UI | state dir 0700, config, log and token 0600; every UI call needs the token |
+| Malicious web page in your browser | Call the UI's API (CSRF), rebind DNS to 127.0.0.1, inject script through a diff | token in a header the page alone holds; `Host`/`Origin` checks; JSON-only bodies; `textContent` rendering, CSP without inline script, `X-Frame-Options: DENY` |
 
 **STRIDE, briefly**
 
@@ -287,7 +365,8 @@ fsmonitor traps that never fire, preflight refusals and the instruction-file war
 out-of-scope and protected-file diffs blocked, symlinks, large binaries, `.env` files and
 secrets in the diff blocked, cleanup after an exception, secret redaction,
 0600/0700 permissions, log rotation, the dashboard allowlist (404 elsewhere), the SSE cap, and
-the HTML escaping against an XSS payload (needs `node`). CI runs the same suite.
+the HTML escaping against an XSS payload (needs `node`). `tests/test_ui.py` covers the control
+UI, one test per control (see the table under [Using the UI](#using-the-ui)). CI runs both.
 
 ## Limitations
 
