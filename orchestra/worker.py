@@ -88,8 +88,11 @@ class Task:
             raise ValueError(f"invalid task name {self.name!r}: use a-z, 0-9 and '-'")
         if self.preset not in PRESETS:
             raise ValueError(f"unknown preset {self.preset!r}: use one of {sorted(PRESETS)}")
-        if not self.paths or not all(isinstance(p, str) and p for p in self.paths):
+        if (not isinstance(self.paths, list) or not self.paths
+                or not all(isinstance(p, str) and p.strip() for p in self.paths)):
             raise ValueError(f"task {self.name!r}: 'paths' must be a non-empty list of globs")
+        if not isinstance(self.max_turns, int) or isinstance(self.max_turns, bool):
+            raise ValueError(f"task {self.name!r}: max_turns must be an integer")
         if not 1 <= self.max_turns <= MAX_TURNS:
             raise ValueError(f"task {self.name!r}: max_turns must be 1..{MAX_TURNS}")
 
