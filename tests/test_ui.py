@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from orchestra.worker import Worker
-from ui.server import MAX_BODY, UIServer, write_token
+from uno_orchestra.worker import Worker
+from uno_orchestra.ui.server import MAX_BODY, UIServer, write_token
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "t0ken-for-tests-" + "x" * 27
@@ -199,7 +199,7 @@ def test_main_branch_blocks_start_until_a_branch_is_created(ui, repo):
     for bad in ("main", "../x", "-x"):
         assert call(ui, "POST", "/api/branch", {"repo": str(repo), "name": bad})[0] == 400
     status, created, _ = call(ui, "POST", "/api/branch", {"repo": str(repo)})
-    assert status == 200 and created["branch"].startswith("orchestra-run-")
+    assert status == 200 and created["branch"].startswith("uno-run-")
     assert git(repo, "symbolic-ref", "--short", "HEAD").strip() == created["branch"]
     _, body, _ = call(ui, "POST", "/api/check", form(repo, "a"))
     assert body["ok"] and not body["on_main"]
@@ -262,7 +262,7 @@ def test_security_headers_and_no_inline_script(ui):
         assert h["Content-Security-Policy"].startswith("default-src 'none'; script-src 'self'")
         assert h["X-Frame-Options"] == "DENY" and h["Referrer-Policy"] == "no-referrer"
         assert h["X-Content-Type-Options"] == "nosniff" and h["Cache-Control"] == "no-store"
-    html = (ROOT / "ui" / "index.html").read_text()
+    html = (ROOT / "uno_orchestra" / "ui" / "index.html").read_text()
     assert not re.search(r"<script(?![^>]*\bsrc=)", html) and " on[a-z]+=" not in html
     assert not re.search(r"\son\w+=", html)
     assert call(ui, "GET", "/server.py")[0] == 404 and call(ui, "GET", "/../main.py")[0] == 404
@@ -318,7 +318,7 @@ def test_full_mock_flow_with_out_of_scope_and_xss_diff(ui, repo, monkeypatch):
     assert not (repo / "bad.txt").exists() and (repo / "good.txt").exists()
     # The diff is returned as data and the page renders it with textContent only.
     assert f"+{payload}" in by["good"]["diff"] and f"+{payload}" in by["bad"]["diff"]
-    js = (ROOT / "ui" / "app.js").read_text()
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
     for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert forbidden not in js
     assert stat.S_IMODE(ui.events_path.stat().st_mode) == 0o600
@@ -427,7 +427,7 @@ def test_get_and_head_never_modify_state(ui, repo):
             assert status == (200 if path == "/api/templates" else 404), (method, path, status)
         for path in read_paths:
             assert call(ui, method, path)[0] in (200, 400, 404), (method, path)
-    assert not (repo / ".orchestra").exists()
+    assert not (repo / ".uno").exists()
 
     assert _fingerprint(ui) == before
     assert ui.run is None and not ui.running()

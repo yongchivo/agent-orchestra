@@ -1,8 +1,8 @@
-"""Roles: per-project agent profiles stored in <repo>/.orchestra/roles/<name>.json.
+"""Roles: per-project agent profiles stored in <repo>/.uno/roles/<name>.json.
 
 A role fixes what an agent is (instructions), what it may do (one of the core presets,
 never free-text tools), where (default paths) and what it must return (text or JSON
-findings). .orchestra/ also holds project.json with the project context. The directory is
+findings). .uno/ also holds project.json with the project context. The directory is
 protected: the merge gate never lets an agent's change to it through, and the agent's
 settings deny Edit/Write on it as well.
 """
@@ -14,7 +14,8 @@ from pathlib import Path
 
 from .worker import MAX_TURNS, NAME_RE, PRESETS
 
-DIR = ".orchestra"
+DIR = ".uno"
+LEGACY_DIR = ".orchestra"   # the name before 0.1.0; still protected, migrated by `uno init`
 OUTPUTS = ("text", "findings")
 ROLE_FIELDS = {"name", "description", "instructions", "preset", "paths", "output",
                "output_format", "max_turns"}
@@ -49,7 +50,7 @@ class Role:
                 or not all(isinstance(p, str) and p.strip() for p in self.paths)):
             raise ValueError(f"role {self.name!r}: paths must be 1..{MAX_PATHS} non-empty globs")
         for p in self.paths:
-            if p.startswith("/") or ".." in p.split("/") or p.split("/")[0] == DIR:
+            if p.startswith("/") or ".." in p.split("/") or p.split("/")[0] in (DIR, LEGACY_DIR):
                 raise ValueError(f"role {self.name!r}: path {p!r} must be relative, without '..' and outside {DIR}/")
         if (not isinstance(self.max_turns, int) or isinstance(self.max_turns, bool)
                 or not 1 <= self.max_turns <= MAX_TURNS):
@@ -67,6 +68,11 @@ def role_from_json(data):
         if key not in data:
             raise ValueError(f"role: '{key}' is required")
     return Role(**data)
+
+
+def has_legacy_dir(repo):
+    """A pre-0.1.0 .orchestra/ that `uno init` can rename to .uno/."""
+    return (Path(repo) / LEGACY_DIR).is_dir() and not (Path(repo) / DIR).exists()
 
 
 def roles_dir(repo):
@@ -153,7 +159,7 @@ TEMPLATES = [
         instructions=(
             "Implement the task completely and minimally, following the project's existing style. "
             "Keep the public API unless the task says otherwise. Only change files inside your "
-            "paths; never touch .orchestra/, CI, build or dependency files, and do not commit. "
+            "paths; never touch .uno/, CI, build or dependency files, and do not commit. "
             "When you receive review findings, fix every medium and high finding that is correct "
             "and say briefly why you skipped any that is not."),
         preset="edit", paths=["**"], output="text",
@@ -197,7 +203,7 @@ def install_templates(repo):
 
 
 def uncommitted(repo, git):
-    """Paths under .orchestra/ that are not committed (the run preflight needs a clean tree)."""
+    """Paths under .uno/ that are not committed (the run preflight needs a clean tree)."""
     out = git(repo, "status", "--porcelain", "--", DIR).stdout
     return [line[3:] for line in out.splitlines() if line.strip()]
 
@@ -205,7 +211,7 @@ def uncommitted(repo, git):
 
 
 # --- trust: roles the user has seen and confirmed --------------------------------------------
-# A repository can ship any .orchestra/ it likes, and its instructions reach the model. The UI
+# A repository can ship any .uno/ it likes, and its instructions reach the model. The UI
 # only uses roles and a project context the user created there or explicitly confirmed; the
 # fingerprint lives in the state directory, outside the repository.
 
@@ -236,7 +242,7 @@ def _trust_load(state_dir):
 
 
 def trusted(repo, state_dir, files=None):
-    """True when .orchestra/ is absent or matches what the user last confirmed."""
+    """True when .uno/ is absent or matches what the user last confirmed."""
     fp = fingerprint_of(snapshot(repo) if files is None else files)
     return fp == "" or _trust_load(state_dir).get(str(Path(repo).resolve())) == fp
 
@@ -251,7 +257,7 @@ def load_confirmed(repo, state_dir):
 
 
 def trust(repo, state_dir):
-    """Record the current .orchestra/ as confirmed (0600, in the state directory)."""
+    """Record the current .uno/ as confirmed (0600, in the state directory)."""
     data = _trust_load(state_dir)
     data[str(Path(repo).resolve())] = fingerprint(repo)
     path = _trust_path(state_dir)
@@ -261,5 +267,5 @@ def trust(repo, state_dir):
         json.dump(data, f, indent=2)
 
 
-UNCONFIRMED = ("the roles and project context in .orchestra/ were not created from this UI, or changed "
+UNCONFIRMED = ("the roles and project context in .uno/ were not created from this UI, or changed "
                "since you confirmed them: review them in Roles & project and confirm before a run")

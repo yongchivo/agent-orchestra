@@ -1,6 +1,6 @@
 # Security policy
 
-agent-orchestra runs AI coding agents against repositories it treats as untrusted. The
+Uno (package `uno_orchestra`, formerly agent-orchestra) runs AI coding agents against repositories it treats as untrusted. The
 controls and the risks that remain are described in the README's "Security controls",
 "Threat model" and "Residual risks" sections.
 

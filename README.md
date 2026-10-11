@@ -1,14 +1,20 @@
-# agent-orchestra
+# Uno
 
-**Run several Claude Code agents in parallel on one repository — each in its own git worktree,
-locked down as an untrusted worker — and watch them work live in a browser dashboard.**
+**Run several Claude Code agents on one repository — each in its own git worktree, locked down
+as an untrusted worker — in parallel or as a pipeline of roles, and watch them work live from a
+local control page.**
 
-![agent-orchestra dashboard](docs/dashboard.png)
+`uno` installs with pipx and sets an existing project up in one command (`uno init`).
+Package `uno_orchestra`, repository `uno-orchestra`, state in `~/.uno-orchestra/`, per-project
+configuration in `.uno/`. Before 0.1.0 this project was called agent-orchestra; see
+[Migrating from agent-orchestra](#migrating-from-agent-orchestra).
+
+![Uno dashboard](docs/dashboard.png)
 
 ## Why
 
 - **Isolation by worktree.** Every agent gets its own git worktree and branch under
-  `~/.agent-orchestra`, so agents never overwrite each other's files and every change is
+  `~/.uno-orchestra`, so agents never overwrite each other's files and every change is
   attributable to exactly one agent.
 - **Parallel orchestration.** Agents run concurrently up to a configurable limit; when they
   finish, branches are merged one at a time and conflicts are reported per agent.
@@ -26,34 +32,67 @@ locked down as an untrusted worker — and watch them work live in a browser das
   what gets merged. See [Security controls](#security-controls) and the
   [threat model](#threat-model).
 
-## Quickstart (no API usage)
+## Quickstart
 
-The `mock` backend simulates agents, so you can try the whole flow without calling Claude.
+Requires Python 3.10+, git and, for real runs, the
+[Claude Code CLI](https://code.claude.com/docs/en/overview) logged in. No third-party runtime
+dependencies.
 
 ```bash
-# a throwaway repository on a feature branch (the orchestrator refuses main/master)
+pipx install git+https://github.com/yongchivo/uno-orchestra   # or: pip install -e . for development
+cd /path/to/your/project
+uno doctor      # git, Python, claude + login, state dir, project, PATH; says how to fix each failure
+uno init        # read-only analysis -> proposed roles -> .uno/ written (accept, edit or remove each role)
+git add .uno .gitignore && git commit -m "Add Uno roles"
+git checkout -b feature/something                              # runs refuse main/master
+uno             # opens the control page with this project selected (same as `uno ui`)
+```
+
+`uno init` never calls a model and never writes outside `.uno/` and `.gitignore`. It detects
+languages by extension, the usual directories (`src`, `app`, `lib`, `tests`, `docs`,
+`.github`), the dependency manager, whether there are tests, and `README`/`CLAUDE.md`/`AGENTS.md`,
+then proposes four roles with paths and presets that follow what it found: `developer` (edit,
+the source directories), `tester` (edit, the test directories and test-file globs),
+`security-analyst` and `architect` (read-only, JSON findings). If `CLAUDE.md` exists it asks
+whether to use it as project context. The roles it writes are recorded as confirmed by you
+(the same fingerprint the UI uses, in `~/.uno-orchestra/trust.json`). Running it again does
+nothing; `uno init --force` regenerates the proposed roles after asking (roles you added are kept).
+In a folder that is not a repository it offers `git init` plus an initial commit.
+
+**Commands**
+
+| Command | What it does |
+|---------|--------------|
+| `uno` / `uno ui` | Local control page on `127.0.0.1:8766` with a one-time token; the current repository is pre-selected |
+| `uno init [PATH] [--force] [--yes]` | Set a project up (above). `--yes` accepts every proposal (non-interactive) |
+| `uno run tasks.json [--repo .] [--backend claude\|mock] [--parallel 3]` | Parallel mode from the terminal; events go to `~/.uno-orchestra/events.jsonl` |
+| `uno doctor [PATH]` | One check per prerequisite with the fix for each failure; exit code 1 when any check fails |
+| `uno dashboard [--events FILE] [--port 8765]` | Live dashboard tailing the event log |
+| `uno --version`, `uno <command> -h` | Version and per-command help |
+
+Every command takes `--state-dir DIR` (default `~/.uno-orchestra`).
+
+**Try it without API usage.** The `mock` backend simulates agents:
+
+```bash
 git init -b main /tmp/demo && git -C /tmp/demo commit --allow-empty -m init
 git -C /tmp/demo checkout -b demo
-
-# terminal 1 — dashboard (binds to 127.0.0.1 only)
-python dashboard/server.py --events events.jsonl --port 8765
-
-# terminal 2 — a run with three fake agents
-python main.py --repo /tmp/demo --tasks tasks.example.json --backend mock --events events.jsonl
+uno dashboard &                                                 # terminal 1 (127.0.0.1 only)
+uno run tasks.example.json --repo /tmp/demo --backend mock      # terminal 2: three fake agents
 git -C /tmp/demo log --oneline --graph
 ```
 
-Requires Python 3.10+ and git. No third-party runtime dependencies.
+## Migrating from agent-orchestra
 
-Prefer a browser? `python start.py` opens a local control page that does the same without
-the terminal: see [Using the UI](#using-the-ui).
-
-For a real run, install and log in to the [Claude Code CLI](https://code.claude.com/docs/en/overview),
-check out a feature branch in the target repository, then:
-
-```bash
-python main.py --repo /path/to/repo --tasks tasks.json --parallel 3 --timeout 900
-```
+- `~/.agent-orchestra/` → `~/.uno-orchestra/`: the first `uno` start copies it, verifies every
+  file, sets 0700/0600 and only then removes the old directory. Approved role fingerprints,
+  recent repositories and templates carry over. If both directories exist nothing is touched
+  (`uno doctor` points it out).
+- `.uno/` → `.uno/` in a repository: `uno init` (and `uno run`) offer to rename it, with
+  `git mv` when it is tracked. Until then roles are read from `.uno/` only, and `.uno/`
+  stays on the protected list and in the agents' deny rules.
+- To rename the GitHub repository: Settings → General → Repository name → `uno-orchestra`.
+  GitHub redirects the old name; then `git remote set-url origin https://github.com/yongchivo/uno-orchestra.git`.
 
 ## How it works
 
@@ -68,17 +107,19 @@ tasks.json ──> orchestrator ──> worktree + branch per agent ──> `cla
 
 | File | Role |
 |------|------|
-| `orchestra/bus.py` | Append-only JSONL event bus: 0600, secrets redacted, size-rotated |
-| `orchestra/worktree.py` | git worktree create / commit / diff / merge / remove, hooks disabled |
-| `orchestra/scope.py` | Deterministic merge gate: task `paths`, protected files, symlinks, binaries |
-| `orchestra/worker.py` | Runs one agent (`claude` or `mock` backend) in a locked-down subprocess |
-| `orchestra/orchestrator.py` | Preflight, limits, parallelism, gate, merge phase, cleanup |
-| `orchestra/roles.py` | Roles and project context in `<repo>/.orchestra/`: strict schema, templates |
-| `orchestra/pipeline.py` | Pipeline mode: plan schema and validation, tool-less planner, labelled handoffs, correction loop, limits |
-| `main.py` | CLI |
-| `ui/server.py`, `ui/app.js`, `start.py` | Local control UI: loopback-only, token-guarded, launches and reviews runs |
-| `dashboard/server.py` | Serves the dashboard and tails `events.jsonl` over SSE (stdlib only) |
-| `dashboard/index.html` | Live view: orchestrator in the centre, one node per agent, message bus below |
+| `uno_orchestra/bus.py` | Append-only JSONL event bus: 0600, secrets redacted, size-rotated |
+| `uno_orchestra/worktree.py` | git worktree create / commit / diff / merge / remove, hooks disabled |
+| `uno_orchestra/scope.py` | Deterministic merge gate: task `paths`, protected files, symlinks, binaries |
+| `uno_orchestra/worker.py` | Runs one agent (`claude` or `mock` backend) in a locked-down subprocess |
+| `uno_orchestra/orchestrator.py` | Preflight, limits, parallelism, gate, merge phase, cleanup |
+| `uno_orchestra/roles.py` | Roles and project context in `<repo>/.uno/`: strict schema, templates |
+| `uno_orchestra/pipeline.py` | Pipeline mode: plan schema and validation, tool-less planner, labelled handoffs, correction loop, limits |
+| `uno_orchestra/cli.py` | The `uno` command: `init`, `ui`, `run`, `doctor`, `dashboard` |
+| `uno_orchestra/init.py` | `uno init`: read-only project analysis, proposed roles, `.uno/` and `.gitignore` |
+| `uno_orchestra/doctor.py` | `uno doctor`: prerequisite checks with fixes |
+| `uno_orchestra/state.py` | `~/.uno-orchestra/` and the one-time migration from `~/.agent-orchestra/` |
+| `uno_orchestra/ui/` | Local control UI (server + page, shipped as package data): loopback-only, token-guarded |
+| `uno_orchestra/dashboard/` | Serves the dashboard page (package data) and tails the event log over SSE |
 
 Task format (`tasks.json`):
 
@@ -120,7 +161,7 @@ step, target step, `artifact` type and a summary), `iteration` and `question`.
 ## Dashboard
 
 ```bash
-python dashboard/server.py --events events.jsonl --port 8765
+uno dashboard --port 8765
 ```
 
 Open http://127.0.0.1:8765. Nodes turn green when an agent's branch merges, red on failure or
@@ -130,7 +171,7 @@ the network; it has no authentication, so only do that on a trusted LAN.
 ## Using the UI
 
 ```bash
-python start.py            # binds 127.0.0.1:8766, opens the browser with a one-time token
+uno ui                     # binds 127.0.0.1:8766, opens the browser with a one-time token
 ```
 
 The page is a thin client: every rule is checked by the server, the page only shows the
@@ -141,11 +182,11 @@ result. It invokes the same core as the CLI and never relaxes a control.
 **New run**: repository path (typed, with a list of recent repositories), backend, parallelism
 and a task editor where each task has a name, prompt, `max_turns`, a permission preset
 (`readonly` or `edit`, the core's presets, never free-text tools) and a required `paths` list.
-Templates are saved under `~/.agent-orchestra/runs/<name>.json` and validated with the same
+Templates are saved under `~/.uno-orchestra/runs/<name>.json` and validated with the same
 schema when loaded. Before Start the server reports:
 
 - blocking errors: dirty tree, `main`/`master` checked out (with a "Create branch
-  `orchestra-run-<date>`" button that checks it out after you confirm), invalid tasks,
+  `uno-run-<date>`" button that checks it out after you confirm), invalid tasks,
   repository outside the allowed roots, a run already in progress;
 - warnings: overlapping `paths` between tasks (possible merge conflict), a prompt that names
   none of its `paths`, more than 3 agents or `max_turns` above 20 on the `claude` backend;
@@ -170,8 +211,8 @@ paste; the UI never pushes or runs `gh`.
 - Loopback only: the server refuses to bind to anything but `127.0.0.1`/`localhost`.
 - A random token per start (`secrets.token_urlsafe(32)`) is required on every API call and
   the event stream, in the `X-Orchestra-Token` header, never in a cookie or a query string,
-  compared with `hmac.compare_digest`. `start.py` passes it in the URL fragment, the page keeps
-  it in memory and cleans the URL; a copy lives in `~/.agent-orchestra/token` (0600).
+  compared with `hmac.compare_digest`. `uno ui` passes it in the URL fragment, the page keeps
+  it in memory and cleans the URL; a copy lives in `~/.uno-orchestra/token` (0600).
 - `Host` and `Origin` must match `http://127.0.0.1:<port>` or `localhost`: anything else is
   403, which stops CSRF from other sites and DNS rebinding.
 - POST bodies must be `application/json` and at most 64 KB.
@@ -206,8 +247,8 @@ paste; the UI never pushes or runs `gh`.
 **Manual verification against a live server**
 
 ```bash
-python start.py --port 8766            # terminal 1
-scripts/smoke_security.sh 8766         # terminal 2 (reads ~/.agent-orchestra/token)
+uno ui --port 8766                     # terminal 1
+scripts/smoke_security.sh 8766         # terminal 2 (reads ~/.uno-orchestra/token)
 ```
 
 The script sends one request per control to the running server and prints `PASS`/`FAIL`
@@ -233,14 +274,14 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
                               role's · at most 8 steps · dependencies form a DAG · unknown fields rejected
                                                               │
                       you approve ──> one worktree per step, from an integration branch agent/<run>/_pipeline
-                                      merge gate per step (paths, protected files, symlinks, secrets, .orchestra/)
+                                      merge gate per step (paths, protected files, symlinks, secrets, .uno/)
                                       artifacts to the next role as labelled UNTRUSTED data
                                       medium/high findings ──> developer again (≤ max rounds, default 2) ──> asks you
                                                               │
                       you click Merge ──> integration branch merged into your branch. Not before.
 ```
 
-**Roles** live in `<repo>/.orchestra/roles/<name>.json` and are edited from the UI (or by hand):
+**Roles** live in `<repo>/.uno/roles/<name>.json`, written by `uno init` and edited from the UI (or by hand):
 
 ```json
 {"name": "security-analyst",
@@ -258,21 +299,22 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
 - `output` is `text` or `findings`. A `findings` role runs with `--json-schema`, so the CLI
   enforces the shape, and the result is parsed strictly again by the code (severity in
   `low|medium|high`, texts capped, at most 50 items).
-- Unknown fields, bad names, absolute paths, `..`, paths under `.orchestra/` and oversized
+- Unknown fields, bad names, absolute paths, `..`, paths under `.uno/` and oversized
   texts are rejected with the same schema on save and on load, so a tampered file is an error,
   not a role.
-- `.orchestra/project.json` holds the project context (`{"context": "..."}`, 4000 characters)
+- `.uno/project.json` holds the project context (`{"context": "..."}`, 4000 characters)
   that every role receives.
 - **Install templates** writes three examples: `developer` (edit, returns a summary),
-  `security-analyst` and `architect` (read-only, return JSON findings).
-- `.orchestra/` must be committed before a run (the preflight needs a clean tree); the UI has a
-  "Commit .orchestra/" button that commits that directory only.
-- `.orchestra/` is protected: it is on the merge gate's protected list, so any change to it
+  `security-analyst` and `architect` (read-only, return JSON findings). `uno init` writes those
+  plus a `tester`, with paths taken from the project's layout.
+- `.uno/` must be committed before a run (the preflight needs a clean tree); the UI has a
+  "Commit .uno/" button that commits that directory only.
+- `.uno/` is protected: it is on the merge gate's protected list, so any change to it
   blocks the step, and the agent settings deny `Edit`/`Write` on it as a first layer.
-- **Roles are used only once you have seen them.** A repository can ship any `.orchestra/`,
+- **Roles are used only once you have seen them.** A repository can ship any `.uno/`,
   and its instructions reach the model. The UI keeps a sha256 of the directory in
-  `~/.agent-orchestra/trust.json` (0600, outside the repository). Roles and context you write
-  from the UI are confirmed by the act of writing them; anything else (a clone, a commit by
+  `~/.uno-orchestra/trust.json` (0600, outside the repository). Roles and context you write
+  from the UI or with `uno init` are confirmed by the act of writing them; anything else (a clone, a commit by
   someone else, a change by hand, a later change) shows up as **NOT CONFIRMED** with every
   role's instructions and the project context listed, and nothing runs on that repository
   until you click confirm: the pipeline chat, **Approve plan** and the parallel **Start** all
@@ -340,7 +382,7 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
   of that plan is checked by code against the roles. A step cannot widen its role's preset,
   leave its role's paths, name a role that does not exist, or add fields such as `tools`.
 - The set of steps is fixed at approval. Nothing an agent writes can add a step, change a role
-  or touch `.orchestra/`.
+  or touch `.uno/`.
 - Reviewer LLMs are an extra layer, never the control. The deterministic gates (paths,
   protected files, symlinks, binaries, secrets, `.env`) run on every step whatever a reviewer
   says, and a reviewer that writes files is blocked.
@@ -361,7 +403,7 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
 | Planner gains tools or settings | `--tools ""`, `--restricted`, no MCP, no session; only `validate_plan` leads to a run | `test_planner_has_no_tools_and_cannot_grant_permissions` |
 | Artifact carries prompt injection for the next agent | delimited, labelled as untrusted data; prompt built by code | `test_injected_artifact_is_data_and_does_not_alter_the_plan`, `test_mock_chain_hands_artifacts_as_labelled_untrusted_data` |
 | Reviewer keeps the developer in a loop | bounded rounds, then a question to the user | `test_correction_loop_stops_at_the_limit_and_asks` |
-| Agent edits roles or project context | `.orchestra/` protected in the gate and denied in the agent settings | `test_agent_changing_orchestra_dir_is_blocked` |
+| Agent edits roles or project context | `.uno/` protected in the gate and denied in the agent settings | `test_agent_changing_orchestra_dir_is_blocked` |
 | Read-only reviewer writes files | any change by a `readonly` role blocks the step | `test_read_only_role_that_writes_is_blocked` |
 | Work reaches the branch without approval | integration branch only; `final_merge` runs on the UI click | `test_final_merge_needs_explicit_approval`, `test_chat_flow_plan_approve_review_merge` |
 | Runaway pipeline | 3600 s total limit, worktrees always cleaned | `test_total_duration_limit_stops_the_pipeline` |
@@ -369,7 +411,7 @@ once, plus every per-agent limit of the parallel mode (turns, wall-clock timeout
 | Handoffs invisible to the user | `handoff` events with source, target and artifact type | `test_handoff_events_are_recorded_with_source_target_and_artifact` |
 | Invalid plan executed anyway | rejected plans never become a plan; approve is 409 | `test_chat_rejects_an_invalid_plan_and_explains` |
 | Agent output steers the planner on re-plan | the planner receives a code-built structured summary, never agent text | `test_planner_never_receives_agent_text` |
-| Repository ships or changes roles behind the user's back | sha256 of `.orchestra/` in the state dir; UI shows and asks for confirmation; chat, Approve and Start re-check it when they run; core warning | `test_roles_from_the_repo_need_confirmation_in_the_ui`, `test_fingerprint_is_checked_when_each_run_starts`, `test_unconfirmed_roles_warn_in_the_core_preflight` |
+| Repository ships or changes roles behind the user's back | sha256 of `.uno/` in the state dir; UI shows and asks for confirmation; chat, Approve and Start re-check it when they run; core warning | `test_roles_from_the_repo_need_confirmation_in_the_ui`, `test_fingerprint_is_checked_when_each_run_starts`, `test_unconfirmed_roles_warn_in_the_core_preflight` |
 | Roles change between the hash and their use | roles, context and fingerprint parsed from one in-memory snapshot | `test_roles_context_and_fingerprint_come_from_one_snapshot` |
 | Steps keep running after pause/cancel/redirect | engine flags plus task cancellation, worktrees removed | `test_chat_pause_resume_cancel_and_redirect` |
 
@@ -397,7 +439,7 @@ click; the resulting history is one merge commit from `agent/<run>/_pipeline`.
 Every control below has a test in `tests/`; the [threat model](#threat-model) maps them to
 attackers. Flags were verified against `claude --help` of Claude Code 2.1.296.
 
-**Agent permissions** (`orchestra/worker.py`)
+**Agent permissions** (`uno_orchestra/worker.py`)
 
 - No shell, ever. Presets are `readonly` (Read, Glob, Grep) and `edit` (+ Edit, Write). There is
   no way to enable Bash from a task file: `git` alone can run arbitrary commands through
@@ -439,11 +481,11 @@ attackers. Flags were verified against `claude --help` of Claude Code 2.1.296.
   the repository tracks `CLAUDE.md`, `AGENTS.md` or a `.claude/` directory at any depth, the run
   prints a warning and emits a `warning` event naming them: those files can steer the agent and
   only `--bare` keeps them out of context (see residual risks).
-- Worktrees live in `~/.agent-orchestra/worktrees/<run_id>` (0700), not next to the repository.
+- Worktrees live in `~/.uno-orchestra/worktrees/<run_id>` (0700), not next to the repository.
 - `try/finally`: agent processes and worktrees are always cleaned up, also after an error or
   Ctrl+C.
 
-**Merge gate** (`orchestra/scope.py`, deterministic: it reads the diff, not the model)
+**Merge gate** (`uno_orchestra/scope.py`, deterministic: it reads the diff, not the model)
 
 - Each task declares `paths`. A diff that touches anything else is not merged: `out_of_scope`.
 - Protected files are never merged automatically even when `paths` cover them: `.github/`,
@@ -490,8 +532,8 @@ on the branch), the user's Anthropic quota, and the event log.
 | Malicious web page in your browser | Call the UI's API (CSRF), rebind DNS to 127.0.0.1, inject script through a diff | token in a header the page alone holds; `Host`/`Origin` checks; JSON-only bodies; `textContent` rendering, CSP without inline script, `X-Frame-Options: DENY` |
 | Agent injecting the next agent (pipeline) | A developer's diff or a reviewer's findings carry instructions for the role that reads them: "add a CI step", "ignore your paths", "report nothing" | artifacts are delimited and labelled as untrusted data, size-capped, inside a prompt built by code; the step set, roles, presets and paths are fixed at approval; the deterministic gate runs on every step regardless of what a reviewer says |
 | Manipulated orchestrator (planner) | A repository file, a previous artifact or a jailbroken model makes the planner propose a step with a non-existent role, a wider preset, paths outside the role, `tools`, or dozens of steps | the planner has no tools and never executes; `validate_plan` enforces roles, presets, paths, the step cap and a DAG; the user sees the plan and approves it; the planner never sees repository files or agent output, only the confirmed roles and context, the chat and a code-built state summary |
-| Malicious `.orchestra/` in the repository | Role instructions that tell the developer to copy credentials or the reviewer to report nothing | roles are shown and confirmed in the UI before use, with a hash kept outside the repository; the gate and the deny rules apply regardless of what a role says |
-| Reviewer that lies or is bribed | A reviewer reports no findings for a change that adds a secret, edits CI or leaves its paths | reviewers are advisory: the gate (paths, protected files, secrets, symlinks, `.orchestra/`) decides, and the final merge is the user's click with the diff in front of them |
+| Malicious `.uno/` in the repository | Role instructions that tell the developer to copy credentials or the reviewer to report nothing | roles are shown and confirmed in the UI before use, with a hash kept outside the repository; the gate and the deny rules apply regardless of what a role says |
+| Reviewer that lies or is bribed | A reviewer reports no findings for a change that adds a secret, edits CI or leaves its paths | reviewers are advisory: the gate (paths, protected files, secrets, symlinks, `.uno/`) decides, and the final merge is the user's click with the diff in front of them |
 
 **STRIDE, briefly**
 

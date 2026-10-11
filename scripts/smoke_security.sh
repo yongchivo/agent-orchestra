@@ -3,12 +3,12 @@
 #
 #   scripts/smoke_security.sh <port> [state-dir]
 #
-# Reads the token from <state-dir>/token (default ~/.agent-orchestra/token), runs one
+# Reads the token from <state-dir>/token (default ~/.uno-orchestra/token), runs one
 # request per control, prints PASS/FAIL per check and exits non-zero if any check fails.
 set -u
 
 PORT="${1:?usage: $0 <port> [state-dir]}"
-STATE_DIR="${2:-$HOME/.agent-orchestra}"
+STATE_DIR="${2:-$HOME/.uno-orchestra}"
 TOKEN="$(cat "$STATE_DIR/token")" || { echo "cannot read $STATE_DIR/token"; exit 2; }
 BASE="http://127.0.0.1:$PORT"
 HOST="127.0.0.1:$PORT"

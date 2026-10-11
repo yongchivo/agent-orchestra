@@ -1,4 +1,4 @@
-// agent-orchestra control UI. No inline scripts (CSP) and no HTML string injection:
+// Uno control UI. No inline scripts (CSP) and no HTML string injection:
 // everything that comes from agents, diffs, files or the server is rendered with textContent.
 (() => {
   'use strict';
@@ -27,7 +27,7 @@
     if (body) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     const r = await fetch(path, opts);
     const data = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (r.status === 401) setConn('● no token: restart start.py', 'var(--red)');
+    if (r.status === 401) setConn('● no token: restart uno ui', 'var(--red)');
     if (!r.ok && !data.errors) throw new Error(data.error || `HTTP ${r.status}`);
     return data;
   }
@@ -86,7 +86,7 @@
   $('addTask').addEventListener('click', () => addTask());
 
   $('branch').addEventListener('click', async () => {
-    const name = 'orchestra-run-' + new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '').replace(/(\d{8})(\d{4})/, '$1-$2');
+    const name = 'uno-run-' + new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '').replace(/(\d{8})(\d{4})/, '$1-$2');
     if (!confirm(`Create and check out branch ${name} in ${$('repo').value.trim()}?`)) return;
     try { const r = await api('/api/branch', { repo: $('repo').value.trim(), name }); $('runState').textContent = `on branch ${r.branch}`; }
     catch (e) { $('runState').textContent = e.message; }
@@ -250,7 +250,7 @@
     if (scroll) $('results').scrollIntoView({ behavior: 'smooth' });
   }
 
-  // --- roles & project context (.orchestra/ in the repository) ----------------------------
+  // --- roles & project context (.uno/ in the repository) ----------------------------
   let rolesData = { roles: [] };
   const R = { name: 'r-name', preset: 'r-preset', output: 'r-output', max_turns: 'r-turns',
               description: 'r-desc', instructions: 'r-instr', output_format: 'r-format', paths: 'r-paths' };
@@ -299,7 +299,7 @@
   $('roleTemplates').addEventListener('click', () => rolesPost('/api/roles/templates', {}));
   $('projectSave').addEventListener('click', () => rolesPost('/api/project', { context: $('projectCtx').value }));
   $('roleTrust').addEventListener('click', () => rolesPost('/api/roles/trust', {}).then(runCheck));
-  $('orchestraCommit').addEventListener('click', () => { if (confirm('Commit .orchestra/ (roles and project context) on the current branch?')) rolesPost('/api/roles/commit', {}); });
+  $('orchestraCommit').addEventListener('click', () => { if (confirm('Commit .uno/ (roles and project context) on the current branch?')) rolesPost('/api/roles/commit', {}); });
   $('repo').addEventListener('change', loadRoles);
 
   // --- pipeline: chat with the orchestrator, approve, watch, merge ------------------------

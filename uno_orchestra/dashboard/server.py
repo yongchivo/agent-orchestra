@@ -2,7 +2,7 @@
 """Dashboard server: serves index.html and streams events.jsonl over Server-Sent Events.
 
 Standard library only. Usage:
-    python dashboard/server.py --events events.jsonl --port 8765
+    uno dashboard [--events ~/.uno-orchestra/events.jsonl] [--port 8765]
 then open http://127.0.0.1:8765
 
 Only the files in FILES are served (nothing else from this directory), SSE clients are
@@ -12,11 +12,11 @@ import argparse
 import json
 import threading
 import time
+from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-HERE = Path(__file__).resolve().parent
 FILES = {"/": "index.html", "/index.html": "index.html"}  # allowlist: nothing else is served
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'")
@@ -35,7 +35,7 @@ class Handler(BaseHTTPRequestHandler):
         name = FILES.get(path)
         if name is None:
             return self.send_error(404)
-        body = (HERE / name).read_bytes()
+        body = resources.files(__package__).joinpath(name).read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -83,18 +83,23 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.25)
 
 
-def main():
-    global EVENTS, SSE_SLOTS
-    p = argparse.ArgumentParser()
-    p.add_argument("--events", default="events.jsonl")
+def add_arguments(p):
+    from .. import state
+    p.add_argument("--events", default=str(state.default_dir() / "events.jsonl"), help="event log to tail")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
     p.add_argument("--max-clients", type=int, default=8, help="simultaneous SSE connections")
-    args = p.parse_args()
+    return p
+
+
+def main(args=None):
+    global EVENTS, SSE_SLOTS
+    if args is None:
+        args = add_arguments(argparse.ArgumentParser(description="Live dashboard for Uno runs.")).parse_args()
     EVENTS = Path(args.events)
     SSE_SLOTS = threading.BoundedSemaphore(args.max_clients)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"dashboard: http://{args.host}:{args.port}  (tailing {EVENTS})", flush=True)
+    print(f"dashboard: http://{args.host}:{srv.server_port}  (tailing {EVENTS})", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
