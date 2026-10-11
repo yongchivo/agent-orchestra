@@ -50,6 +50,9 @@
   .msg .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msg.kind-conflict .txt, .msg.kind-failed .txt { color: var(--red); }
   .msg.kind-merge .txt, .msg.kind-done .txt { color: var(--green); }
+  .msg.kind-handoff .txt, .msg.kind-iteration .txt { color: var(--blue); }
+  .msg.kind-question .txt, .msg.kind-out_of_scope .txt, .msg.kind-needs_review .txt { color: #e6d27a; }
+  .node.blocked { border-color: #e6d27a; }
 
   #status { background: #232633; color: var(--dim); padding: 6px 16px; font-size: 13px; display: flex; justify-content: space-between; }
   #status b { color: var(--text); font-weight: 400; }
@@ -109,7 +112,7 @@
   }
 
   function renderAgent(a) {
-    a.el.classList.remove('running', 'done', 'failed', 'conflict');
+    a.el.classList.remove('running', 'done', 'failed', 'conflict', 'blocked');
     a.el.classList.add(a.status);
     a.el.querySelector('.task').textContent = a.task || '—';
     a.el.querySelector('.pct').textContent = a.pct + '%';
@@ -194,7 +197,9 @@
     let s;
     if (runInfo.summary) {
       const v = Object.values(runInfo.summary);
-      s = `<b>run finished</b> · ${v.filter(x => x === 'merged').length}/${v.length} merged`;
+      s = runInfo.mode === 'pipeline'
+        ? `<b>pipeline finished</b> · ${v.filter(x => x === 'done').length}/${v.length} steps done · merge is yours to approve in the UI`
+        : `<b>run finished</b> · ${v.filter(x => x === 'merged').length}/${v.length} merged`;
     } else s = `<b>${n} agents</b> running (${esc(runInfo.backend || '?')} backend)`;
     statusText.innerHTML = `${s} · ${runInfo.msgs} messages on the bus`;
   }
@@ -203,13 +208,15 @@
     runInfo.msgs++;
     switch (e.kind) {
       case 'run_start':
-        runInfo.backend = e.backend; runInfo.summary = null;
-        (e.workers || []).forEach(ensureAgent); break;
-      case 'start': { const a = ensureAgent(e.source); a.status = 'running'; a.task = shortLabel(e.message); renderAgent(a); break; }
+        runInfo.backend = e.backend; runInfo.summary = null; runInfo.mode = e.mode;
+        // Pipeline runs name the role of each step; it becomes the node label.
+        (e.workers || []).forEach(w => { const a = ensureAgent(w); a.task = (e.roles || {})[w] || a.task; renderAgent(a); }); break;
+      case 'start': { const a = ensureAgent(e.source); a.status = 'running'; a.task = a.task || shortLabel(e.message); renderAgent(a); break; }
       case 'progress': { const a = ensureAgent(e.source); a.pct = e.progress ?? a.pct; renderAgent(a); break; }
       case 'done': { const a = ensureAgent(e.source); a.status = 'done'; a.pct = 100; renderAgent(a); break; }
       case 'failed': { const a = ensureAgent(e.source); a.status = 'failed'; renderAgent(a); break; }
       case 'conflict': { const a = ensureAgent(e.target); a.status = 'conflict'; renderAgent(a); break; }
+      case 'out_of_scope': case 'needs_review': { const a = ensureAgent(e.target); a.status = 'blocked'; renderAgent(a); break; }
       case 'run_end': runInfo.summary = e.summary; break;
     }
     if (e.target && e.kind !== 'progress') packet(e.source, e.target);

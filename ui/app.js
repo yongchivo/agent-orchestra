@@ -124,7 +124,7 @@
 
   // --- run: start, stream, stop ----------------------------------------------------------
   let running = false;
-  const agents = new Map();
+  const agents = new Map(), roleOf = new Map();  // roleOf: step -> role, from a pipeline's run_start
   function agentCard(name) {
     if (!agents.has(name)) {
       const node = el('div', 'node');
@@ -155,13 +155,14 @@
   }
   function handle(e) {
     switch (e.kind) {
-      case 'run_start': (e.workers || []).forEach(w => agentCard(w)); $('liveTitle').textContent = `${e.run_id} · ${e.backend} · ${e.message}`; break;
-      case 'start': setAgent(e.source, 'running', 0, (e.message || '').split(/\s+/).slice(0, 3).join(' ')); break;
+      case 'run_start': (e.workers || []).forEach(w => agentCard(w)); Object.entries(e.roles || {}).forEach(([w, r]) => roleOf.set(w, r)); $('liveTitle').textContent = `${e.run_id} · ${e.backend} · ${e.message}`; break;
+      case 'start': setAgent(e.source, 'running', 0, roleOf.get(e.source) || (e.message || '').split(/\s+/).slice(0, 3).join(' ')); break;
       case 'progress': setAgent(e.source, 'running', e.progress); return;  // shown on the card only
       case 'done': setAgent(e.source, 'done', 100); break;
       case 'failed': if (e.source !== 'orchestrator') setAgent(e.source, 'failed'); break;
       case 'conflict': case 'out_of_scope': case 'needs_review': setAgent(e.target, e.kind); break;
       case 'merge': setAgent(e.target, 'merged', 100); break;
+      case 'handoff': case 'iteration': case 'question': break;  // logged below, shown as bus messages
     }
     addLog(e);
   }
@@ -187,10 +188,12 @@
     await finish();
   }
 
+  let pipelineLive = false;
   async function finish() {
     running = false; $('stop').disabled = true; $('runState').textContent = 'finished';
     setConn('● idle', 'var(--dim)');
-    try { renderResults(await api('/api/results'), true); } catch (e) { $('runState').textContent = e.message; }
+    if (pipelineLive) { pipelineLive = false; await refreshPipeline(); }
+    else { try { renderResults(await api('/api/results'), true); } catch (e) { $('runState').textContent = e.message; } }
     runCheck();
   }
 
@@ -247,6 +250,124 @@
     if (scroll) $('results').scrollIntoView({ behavior: 'smooth' });
   }
 
+  // --- roles & project context (.orchestra/ in the repository) ----------------------------
+  let rolesData = { roles: [] };
+  const R = { name: 'r-name', preset: 'r-preset', output: 'r-output', max_turns: 'r-turns',
+              description: 'r-desc', instructions: 'r-instr', output_format: 'r-format', paths: 'r-paths' };
+  function fillRole(role) {
+    const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [] };
+    for (const [k, id] of Object.entries(R)) $(id).value = k === 'paths' ? (r.paths || []).join(' ') : (r[k] ?? '');
+  }
+  function readRole() {
+    const r = {};
+    for (const [k, id] of Object.entries(R)) r[k] = $(id).value;
+    r.name = r.name.trim(); r.max_turns = parseInt(r.max_turns, 10) || 0;
+    r.paths = r.paths.split(/[\s,]+/).filter(Boolean);
+    return r;
+  }
+  function renderRoles() {
+    const sel = $('roleList'); const current = sel.value; clear(sel);
+    sel.appendChild(el('option', '', '(new)')).value = '';
+    (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset} · ${r.output}`); o.value = r.name; sel.appendChild(o); });
+    if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    $('projectCtx').value = rolesData.project_context || '';
+    $('roleTemplates').disabled = !(rolesData.templates || []).length;
+    $('orchestraCommit').hidden = !(rolesData.uncommitted || []).length;
+    setList($('rolesErrors'), rolesData.error ? [rolesData.error] : []);
+    $('rolesState').textContent = `${(rolesData.roles || []).length} roles` +
+      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '');
+  }
+  async function loadRoles() {
+    const repo = $('repo').value.trim(); if (!repo) return;
+    try { rolesData = await api('/api/roles?repo=' + encodeURIComponent(repo)); }
+    catch (e) { rolesData = { roles: [], error: e.message }; }
+    renderRoles();
+  }
+  async function rolesPost(path, body) {
+    try { rolesData = await api(path, { repo: $('repo').value.trim(), ...body }); renderRoles(); }
+    catch (e) { setList($('rolesErrors'), [e.message]); }
+  }
+  $('roleList').addEventListener('change', () => fillRole((rolesData.roles || []).find(r => r.name === $('roleList').value)));
+  $('roleNew').addEventListener('click', () => { $('roleList').value = ''; fillRole(null); });
+  $('roleSave').addEventListener('click', () => rolesPost('/api/roles', { role: readRole() }).then(() => { $('roleList').value = readRole().name; }));
+  $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(`Delete role ${n}?`)) rolesPost('/api/roles/delete', { name: n }).then(() => fillRole(null)); });
+  $('roleTemplates').addEventListener('click', () => rolesPost('/api/roles/templates', {}));
+  $('projectSave').addEventListener('click', () => rolesPost('/api/project', { context: $('projectCtx').value }));
+  $('orchestraCommit').addEventListener('click', () => { if (confirm('Commit .orchestra/ (roles and project context) on the current branch?')) rolesPost('/api/roles/commit', {}); });
+  $('repo').addEventListener('change', loadRoles);
+
+  // --- pipeline: chat with the orchestrator, approve, watch, merge ------------------------
+  let pipe = { state: 'idle', transcript: [] }, pipeTimer = null;
+  function renderPipeline() {
+    const st = pipe.state;
+    $('pipeState').textContent = st + (pipe.iterations ? ` · round ${pipe.iterations}/${pipe.max_iterations}` : '');
+    const box = $('chat'); clear(box);
+    (pipe.transcript || []).forEach(m => {
+      const row = el('div', 'chat-msg ' + m.who); row.appendChild(el('span', 'who', m.who === 'you' ? 'you' : 'orchestrator'));
+      row.appendChild(el('span', 'text', m.text)); box.appendChild(row);
+    });
+    box.scrollTop = box.scrollHeight;
+    $('pApprove').disabled = st !== 'proposed';
+    $('pPause').disabled = st !== 'running';
+    $('pResume').disabled = !(st === 'paused' || st === 'question');
+    $('pCancel').disabled = !['proposed', 'running', 'paused', 'question'].includes(st);
+    $('chatSend').disabled = st === 'planning';
+    $('pipeInfo').textContent = pipe.branch ? `integration branch ${pipe.branch}` : '';
+    const table = $('planTable'); table.hidden = !pipe.plan;
+    if (pipe.plan) {
+      const tb = table.querySelector('tbody'); clear(tb);
+      pipe.plan.steps.forEach((s, i) => {
+        const tr = el('tr');
+        [String(i + 1), s.id, s.role, s.goal, s.paths.join(' '), s.depends_on.join(', ') || '—'].forEach(t => tr.appendChild(el('td', '', t)));
+        tr.appendChild(el('td', 'st-' + s.status, s.status + (s.detail ? `: ${s.detail}` : '') +
+          (s.findings && s.findings.length ? ` · ${s.findings.length} findings` : '')));
+        tr.appendChild(el('td', '', s.iteration ? String(s.iteration) : '—'));
+        tb.appendChild(tr);
+      });
+    }
+    const review = st === 'review' || st === 'merged';
+    $('pipeReview').hidden = !review;
+    if (review) {
+      setList($('pendingFindings'), (pipe.pending_findings || []).map(f =>
+        `[${f.severity}] ${f.step} (${f.role}): ${f.file}${f.line ? ':' + f.line : ''} — ${f.description} → ${f.recommendation}`));
+      const d = $('pipeDiff'); clear(d); d.appendChild(diffPre(pipe.diff));
+      $('pipeCmds').textContent = (pipe.commands || []).join('\n');
+      $('pMerge').disabled = st !== 'review';
+    }
+    clearTimeout(pipeTimer);
+    if (['planning', 'running', 'paused', 'question'].includes(st)) pipeTimer = setTimeout(refreshPipeline, 1500);
+  }
+  async function refreshPipeline() {
+    try { pipe = await api('/api/pipeline'); } catch (e) { $('pipeState').textContent = e.message; return; }
+    renderPipeline();
+  }
+  async function pipePost(path, body) {
+    try { const r = await api(path, body || {}); await refreshPipeline(); return r; }
+    catch (e) { $('pipeState').textContent = e.message; }
+  }
+  $('chatSend').addEventListener('click', async () => {
+    const message = $('chatInput').value.trim(); if (!message) return;
+    const r = await pipePost('/api/chat', { message, repo: $('repo').value.trim(), backend: $('backend').value,
+      parallel: parseInt($('parallel').value, 10) || 0, max_iterations: parseInt($('iters').value, 10) || 0 });
+    if (r) $('chatInput').value = '';
+  });
+  $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('chatSend').click(); });
+  $('pApprove').addEventListener('click', async () => {
+    const r = await pipePost('/api/pipeline/approve');
+    if (!r) return;
+    running = true; pipelineLive = true; $('live').hidden = false; $('results').hidden = true;
+    clear($('agents')); clear($('log')); agents.clear(); roleOf.clear();
+    statusText.textContent = `pipeline running in ${$('repo').value.trim()}`;
+    stream(r.offset);
+  });
+  $('pPause').addEventListener('click', () => pipePost('/api/pipeline/pause'));
+  $('pResume').addEventListener('click', () => pipePost('/api/pipeline/resume'));
+  $('pCancel').addEventListener('click', () => pipePost('/api/pipeline/cancel'));
+  $('pMerge').addEventListener('click', () => {
+    if (confirm(`Merge ${pipe.branch} into your branch? Review the diff and the pending findings first.`)) pipePost('/api/pipeline/merge');
+  });
+  $('pDiscard').addEventListener('click', () => pipePost('/api/pipeline/discard'));
+
   // --- boot --------------------------------------------------------------------------------
   async function boot() {
     try {
@@ -262,6 +383,7 @@
     if (!tasksBox.children.length) addTask();
     updateGithub();
     runCheck();
+    fillRole(null); loadRoles(); refreshPipeline();
   }
   boot();
 })();

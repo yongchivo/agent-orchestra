@@ -55,11 +55,12 @@ check "unlisted file is not served -> 404"          404 "$(code "$BASE/server.py
 fingerprint() { find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l 2>/dev/null | md5 2>/dev/null || find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l | md5sum; }
 BEFORE="$(fingerprint)"
 for m in GET HEAD; do
-  for p in /api/start /api/stop /api/branch /api/check "/api/start?repo=/tmp/x" "/api/branch?repo=/tmp/x&name=evil"; do
+  for p in /api/start /api/stop /api/branch /api/check "/api/start?repo=/tmp/x" "/api/branch?repo=/tmp/x&name=evil" \
+           /api/chat "/api/chat?repo=/tmp/x&message=hi" /api/pipeline/approve /api/pipeline/merge /api/roles/delete "/api/roles/commit?repo=/tmp/x"; do
     if [ "$m" = HEAD ]; then c="$(code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; else c="$(code -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; fi
     check "$m $p is not an action -> 404" 404 "$c"
   done
-  for p in / /app.js /style.css /api/status /api/results /api/templates "/api/events?from=0"; do
+  for p in / /app.js /style.css /api/status /api/results /api/templates "/api/events?from=0" /api/pipeline "/api/roles?repo=/tmp/x"; do
     if [ "$m" = HEAD ]; then code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; else curl -s -m 3 -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; fi
   done
 done

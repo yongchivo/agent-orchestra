@@ -26,6 +26,18 @@ PRESETS = {
 DENIED_TOOLS = ["Bash", "WebFetch", "WebSearch", "mcp__*"]
 MAX_TURNS = 50
 KILL_GRACE = 5  # seconds between SIGTERM and SIGKILL
+OUTPUTS = ("text", "findings")
+# Structured output of a reviewer role (pipeline mode). Parsed strictly by pipeline.parse_findings.
+FINDINGS_SCHEMA = {
+    "type": "object",
+    "properties": {"findings": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                       "file": {"type": "string"}, "line": {"type": "integer"},
+                       "description": {"type": "string"}, "recommendation": {"type": "string"}},
+        "required": ["severity", "file", "description", "recommendation"]}}},
+    "required": ["findings"],
+}
 
 # Credential stores the agent must never read, even though --restricted already confines
 # the file tools to the worktree. ".env*" is denied everywhere, the worktree included.
@@ -50,7 +62,10 @@ def agent_settings():
     return {
         "disableAllHooks": True,
         "permissions": {
-            "deny": [f"Read({d}/**)" for d in SENSITIVE_DIRS] + ["Read(//**/.env*)"] + DENIED_TOOLS,
+            # .orchestra/ holds the roles and project context: no agent edits it (the merge
+            # gate blocks it deterministically too; this is the first layer).
+            "deny": [f"Read({d}/**)" for d in SENSITIVE_DIRS] + ["Read(//**/.env*)"]
+                    + ["Edit(//**/.orchestra/**)", "Write(//**/.orchestra/**)"] + DENIED_TOOLS,
         },
         # Defence in depth: Bash is removed above. If a future preset brought it back, the
         # OS sandbox (seatbelt on macOS, bubblewrap on Linux) would still confine it.
@@ -81,6 +96,7 @@ class Task:
     paths: list          # globs the agent may change; anything else blocks the merge
     preset: str = "edit"
     max_turns: int = 20
+    output: str = "text"  # "findings": the agent must return FINDINGS_SCHEMA (pipeline reviewers)
 
     def __post_init__(self):
         # The name becomes a directory and a branch: validate it strictly.
@@ -95,6 +111,8 @@ class Task:
             raise ValueError(f"task {self.name!r}: max_turns must be an integer")
         if not 1 <= self.max_turns <= MAX_TURNS:
             raise ValueError(f"task {self.name!r}: max_turns must be 1..{MAX_TURNS}")
+        if self.output not in OUTPUTS:
+            raise ValueError(f"task {self.name!r}: output must be one of {list(OUTPUTS)}")
 
     @property
     def tools(self):
@@ -114,6 +132,8 @@ class Worker:
         self.status = "pending"
         self.progress = 0
         self.proc = None
+        self.output = None   # final text, or the structured output of a "findings" task
+        self.round = 1       # correction round in pipeline mode (the mock reviewer uses it)
 
     @property
     def name(self):
@@ -145,6 +165,19 @@ class Worker:
 
     async def _run_mock(self):
         import random
+        if self.task.output == "findings":
+            # A mock reviewer: reads, then flags one medium finding on the first round and is
+            # satisfied on the next, so the mock pipeline shows one correction loop.
+            for i, tool in enumerate(("Read", "Grep"), 1):
+                await asyncio.sleep(random.uniform(0.1, 0.3))
+                self.bus.emit(self.name, "tool", tool, tool=tool)
+                self._progress(50 * i)
+            target = next((p.name for p in sorted(self.workdir.glob("*.txt"))), "-")
+            self.output = {"findings": [] if self.round > 1 else [
+                {"severity": "medium", "file": target, "line": 1,
+                 "description": "mock finding: the new code does not validate its input",
+                 "recommendation": "validate the input before using it"}]}
+            return
         steps = random.randint(4, 7)
         for i in range(1, steps + 1):
             await asyncio.sleep(random.uniform(0.1, 0.4))
@@ -153,6 +186,7 @@ class Worker:
         # Append (not overwrite) so repeated runs always produce a real commit to merge.
         with (self.workdir / f"{self.name}.txt").open("a", encoding="utf-8") as f:
             f.write(f"work of agent {self.name} on {self.branch}\n")
+        self.output = f"mock summary: appended one line to {self.name}.txt"
 
     def command(self, env=None):
         """Headless CLI invocation. Every flag below exists in Claude Code 2.1.296."""
@@ -173,6 +207,8 @@ class Worker:
             "--settings", str(self.config_dir / "settings.json"),
             "--disable-slash-commands", "--no-session-persistence",
         ]
+        if self.task.output == "findings":
+            cmd += ["--json-schema", json.dumps(FINDINGS_SCHEMA)]
         if "ANTHROPIC_API_KEY" in env:
             # Skips hooks, skills, plugins, .mcp.json and the repository's CLAUDE.md. It only
             # works with API-key auth (bare mode never reads OAuth or the keychain).
@@ -228,8 +264,10 @@ class Worker:
                                       tool=block.get("name"))
                 # Real progress is unknowable; estimate from turns used (capped at 95%).
                 self._progress(min(95, 100 * turns / self.task.max_turns))
-            elif kind == "result" and msg.get("is_error"):
-                raise RuntimeError(msg.get("result", "agent reported an error"))
+            elif kind == "result":
+                if msg.get("is_error"):
+                    raise RuntimeError(msg.get("result", "agent reported an error"))
+                self.output = msg.get("structured_output", msg.get("result"))
         code = await proc.wait()
         if code != 0:
             err = (await proc.stderr.read()).decode(errors="replace").strip()

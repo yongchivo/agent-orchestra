@@ -20,9 +20,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from orchestra import orchestrator, scope, worktree
+from orchestra import orchestrator, pipeline, roles as roles_mod, scope, worktree
 from orchestra.bus import EventBus
-from orchestra.worker import NAME_RE, PRESETS, Task
+from orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
 HERE = Path(__file__).resolve().parent
 STATIC = {
@@ -37,7 +37,8 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_BODY = 64 * 1024
 MAX_DIFF = 200 * 1024
 BACKENDS = ("mock", "claude")
-TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns"}
+TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns", "output"}
+MAX_CHAT = 4000
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$")
 RECENT_MAX = 10
 
@@ -77,7 +78,8 @@ def parse_tasks(raw):
             if key not in t:
                 raise ValueError(f"task {i}: '{key}' is required")
         tasks.append(Task(str(t["name"]), str(t["prompt"]), t["paths"],
-                          str(t.get("preset", "edit")), t.get("max_turns", 20)))
+                          str(t.get("preset", "edit")), t.get("max_turns", 20),
+                          output=str(t.get("output", "text"))))
     if len({t.name for t in tasks}) != len(tasks):
         raise ValueError("task names must be unique")
     return tasks
@@ -125,6 +127,232 @@ def _write_private_json(path, data):
         json.dump(data, f, indent=2)
 
 
+# --- pipeline session (chat) -----------------------------------------------------------------
+
+class Chat:
+    """One conversational pipeline at a time. States:
+    idle -> planning -> proposed -> running | paused | question -> review -> merged -> idle.
+    A message while a plan runs cancels the steps in flight (the work merged so far stays on
+    the integration branch) and asks the planner again: that is how the user redirects."""
+    COMMANDS = {"/approve": "approve", "/pause": "pause", "/resume": "resume", "/cancel": "cancel"}
+    ACTIVE = ("running", "paused", "question")
+
+    def __init__(self, server):
+        self.srv = server
+        self.state = "idle"
+        self.transcript = []
+        self.repo = self.backend = None
+        self.parallel, self.max_iterations = 2, pipeline.DEFAULT_ITERATIONS
+        self.roles, self.project_context = {}, ""
+        self.plan = None            # (summary, [Step])
+        self.engine = None
+        self.loop = self.task = self.thread = None
+        self.base = self.branch = None   # original base commit; latest integration branch
+        self.result = self.error = None
+        self.offset = 0
+        self.history = []            # one line per finished run, for re-planning
+
+    def say(self, who, text):
+        self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
+
+    def active(self):
+        return self.state in self.ACTIVE
+
+    # -- chat
+    def message(self, body):
+        text = body.get("message")
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_CHAT:
+            raise ValueError(f"message must be a non-empty string of at most {MAX_CHAT} characters")
+        text = text.strip()
+        cmd = self.COMMANDS.get(text.lower())
+        if cmd:
+            return getattr(self, cmd)()
+        if self.state == "planning":
+            return 409, {"error": "the orchestrator is still planning"}
+        if self.state == "idle" or self.state == "merged":
+            if self.srv.running():
+                return 409, {"error": "a run is already in progress"}
+            self._setup(body)
+        elif self.active():
+            self._cancel_engine("redirected by the user")
+        self.say("you", text)
+        self.state = "planning"
+        threading.Thread(target=self._plan, args=(text,), daemon=True).start()
+        return 200, {"state": self.state}
+
+    def _setup(self, body):
+        repo = validate_repo(body.get("repo"), self.srv.allowed_roots)
+        worktree.preflight(repo)
+        backend = body.get("backend", "mock")
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {list(BACKENDS)}")
+        parallel = body.get("parallel", 2)
+        if not isinstance(parallel, int) or isinstance(parallel, bool) or not 1 <= parallel <= orchestrator.MAX_PARALLEL:
+            raise ValueError(f"parallel must be an integer 1..{orchestrator.MAX_PARALLEL}")
+        iters = body.get("max_iterations", pipeline.DEFAULT_ITERATIONS)
+        if not isinstance(iters, int) or isinstance(iters, bool) or not 1 <= iters <= pipeline.MAX_ITERATIONS:
+            raise ValueError(f"max_iterations must be an integer 1..{pipeline.MAX_ITERATIONS}")
+        roles = roles_mod.load_roles(repo)
+        if not roles:
+            raise ValueError("the repository has no roles: install the templates or create one first")
+        self.__init__(self.srv)
+        self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
+        self.roles, self.project_context = roles, roles_mod.project_context(repo)
+        self.srv.remember_repo(repo)
+
+    def _plan(self, request):
+        history = "\n".join(self.history)
+        rejected = None
+        for _ in range(2):  # one retry with the validator's explanation
+            try:
+                raw = pipeline.propose(request, self.roles, self.project_context, self.backend,
+                                       self.transcript[:-1], history, rejected, cwd=str(self.srv.state_dir))
+                summary, steps = pipeline.validate_plan(raw, self.roles)
+            except pipeline.PlanError as exc:
+                rejected = str(exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 - shown in the chat
+                rejected = f"{type(exc).__name__}: {exc}"
+                break
+            self.plan = (summary, steps)
+            lines = [summary] + [f"{i}. [{s.role}] {s.id}: {s.goal} (paths {', '.join(s.paths)}"
+                                 + (f"; after {', '.join(s.depends_on)}" if s.depends_on else "") + ")"
+                                 for i, s in enumerate(steps, 1)]
+            self.say("orchestrator", "\n".join(lines) + "\n\nApprove to run this plan, or tell me what to change.")
+            self.state = "proposed"
+            return
+        self.say("orchestrator", f"I could not produce a valid plan: {rejected}\nRephrase the request or adjust the roles.")
+        self.state = "review" if self.branch else "idle"
+
+    # -- controls
+    def approve(self):
+        if self.state != "proposed":
+            return 409, {"error": "there is no plan waiting for approval"}
+        if self.srv.running():
+            return 409, {"error": "a run is already in progress"}
+        summary, steps = self.plan
+        self.offset = self.srv.events_path.stat().st_size if self.srv.events_path.exists() else 0
+        self.engine = pipeline.Pipeline(
+            self.repo, self.roles, steps, EventBus(self.srv.events_path), self.backend,
+            max_parallel=self.parallel, max_iterations=self.max_iterations,
+            timeout=self.srv.agent_timeout, state_dir=self.srv.state_dir,
+            project_context=self.project_context, base_ref=self.branch or "HEAD", base=self.base,
+            on_question=lambda q: self._question(q))
+        self.loop = asyncio.new_event_loop()
+        self.task = self.loop.create_task(self.engine.run())
+        self.state = "running"
+        self.say("orchestrator", f"Plan approved: running {len(steps)} steps.")
+        self.thread = threading.Thread(target=self._run_thread, daemon=True)
+        self.thread.start()
+        return 200, {"state": self.state, "offset": self.offset}
+
+    def _question(self, text):
+        self.state = "question"
+        self.say("orchestrator", text)
+
+    def _run_thread(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.result = self.loop.run_until_complete(self.task)
+        except Exception as exc:  # noqa: BLE001 - surfaced in the chat
+            self.error = f"{type(exc).__name__}: {exc}"
+            self.result = self.engine.result()
+        finally:
+            self.loop.close()
+            self.base = self.engine.base
+            if self.engine.branch:
+                self.branch = self.engine.branch
+            self.error = self.error or self.result.get("error")
+            self._finish()
+
+    def _finish(self):
+        r = self.result
+        statuses = ", ".join(f"{s['id']}: {s['status']}" for s in r["steps"])
+        pending = r["pending_findings"]
+        self.history.append(f"run {r['run_id']}: {statuses}; {len(pending)} findings pending"
+                            + (f"; error: {self.error}" if self.error else ""))
+        msg = f"Run finished: {statuses}."
+        if self.error:
+            msg += f" {self.error}."
+        if pending:
+            msg += f" {len(pending)} findings pending ({len(pipeline.severe(pending))} medium/high)."
+        msg += " Review the consolidated diff below; nothing reaches your branch until you merge."
+        self.say("orchestrator", msg)
+        self.state = "review"
+
+    def _control(self, method, want):
+        if self.state not in want or not self.engine or not self.loop:
+            return 409, {"error": f"cannot {method} in state {self.state}"}
+        self.loop.call_soon_threadsafe(getattr(self.engine, method))
+        self.state = {"pause": "paused", "resume": "running"}[method]
+        self.say("you", f"/{method}")
+        return 200, {"state": self.state}
+
+    def pause(self):
+        return self._control("pause", ("running",))
+
+    def resume(self):
+        return self._control("resume", ("paused", "question"))
+
+    def _cancel_engine(self, why):
+        self.loop.call_soon_threadsafe(self.engine.cancel)
+        self.loop.call_soon_threadsafe(self.task.cancel)
+        self.thread.join(30)
+        self.say("orchestrator", f"Cancelled ({why}); the steps merged so far stay on {self.branch or 'the integration branch'}.")
+
+    def cancel(self):
+        if self.state == "proposed":
+            self.plan, self.state = None, ("review" if self.branch else "idle")
+            self.say("you", "/cancel")
+            self.say("orchestrator", "Plan discarded.")
+            return 200, {"state": self.state}
+        if not self.active():
+            return 409, {"error": f"cannot cancel in state {self.state}"}
+        self.say("you", "/cancel")
+        self._cancel_engine("by the user")
+        return 200, {"state": self.state}
+
+    def merge(self):
+        """The only way to the user's branch: explicit approval, in the review state."""
+        if self.state != "review" or not self.branch:
+            return 409, {"error": "there is nothing approved to merge"}
+        ok, out = pipeline.final_merge(self.repo, self.branch)
+        if not ok:
+            self.say("orchestrator", f"Merge failed and was aborted: {out[:300]}")
+            return 409, {"error": "merge conflict; aborted", "detail": out[:300]}
+        self.state = "merged"
+        self.say("orchestrator", f"Merged {self.branch} into your branch.")
+        return 200, {"state": self.state, "message": out[:300]}
+
+    def discard(self):
+        if self.state not in ("review", "merged"):
+            return 409, {"error": f"cannot discard in state {self.state}"}
+        branch = self.branch
+        self.__init__(self.srv)
+        self.say("orchestrator", f"Session closed. Branch {branch} is kept for inspection.")
+        return 200, {"state": self.state}
+
+    def snapshot(self):
+        plan = None
+        if self.plan:
+            steps = self.engine.steps if self.engine else self.plan[1]
+            plan = {"summary": self.plan[0], "steps": [s.snapshot() for s in steps]}
+        out = {"state": self.state, "transcript": self.transcript, "plan": plan,
+               "repo": str(self.repo) if self.repo else None, "backend": self.backend,
+               "branch": self.branch, "offset": self.offset, "error": self.error,
+               "max_iterations": self.max_iterations,
+               "limits": {"steps": pipeline.MAX_STEPS, "iterations": pipeline.MAX_ITERATIONS,
+                          "duration": pipeline.MAX_DURATION}}
+        if self.engine:
+            out["iterations"] = self.engine.iterations
+        if self.state in ("review", "merged") and self.branch:
+            out["diff"] = pipeline.consolidated_diff(self.repo, self.base, self.branch, MAX_DIFF)
+            out["pending_findings"] = (self.result or {}).get("pending_findings", [])
+            out["commands"] = [f"git -C {self.repo} diff {self.base[:12]} {self.branch}",
+                               f"git -C {self.repo} merge --no-ff {self.branch}"]
+        return out
+
+
 # --- server ----------------------------------------------------------------------------------
 
 class UIServer(ThreadingHTTPServer):
@@ -142,6 +370,7 @@ class UIServer(ThreadingHTTPServer):
         self.last_activity = time.monotonic()
         self.lock = threading.Lock()
         self.run = None  # the current or last run
+        self.chat = Chat(self)
         self.events_path = self.state_dir / "events.jsonl"
         for d in (self.state_dir, self.state_dir / "runs"):
             d.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -150,7 +379,7 @@ class UIServer(ThreadingHTTPServer):
 
     # -- state helpers
     def running(self):
-        return self.run is not None and not self.run.get("finished")
+        return (self.run is not None and not self.run.get("finished")) or self.chat.active()
 
     def _idle_watch(self):
         while True:
@@ -323,6 +552,51 @@ class UIServer(ThreadingHTTPServer):
         return {"repo": str(data.get("repo", "")), "backend": data.get("backend", "mock"),
                 "parallel": data.get("parallel", 2), "tasks": [asdict(t) for t in tasks]}
 
+    # -- roles and project context (.orchestra/ in the repository)
+    def roles_view(self, repo_raw):
+        repo = validate_repo(repo_raw, self.allowed_roots)
+        error, roles = None, {}
+        try:
+            roles = roles_mod.load_roles(repo)
+            context = roles_mod.project_context(repo)
+        except ValueError as exc:
+            error, context = str(exc), ""
+        return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
+                "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
+                "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
+                "uncommitted": roles_mod.uncommitted(repo, worktree.git)}
+
+    def save_role(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        role = roles_mod.role_from_json(body.get("role"))
+        roles_mod.save_role(repo, role)
+        return self.roles_view(str(repo))
+
+    def delete_role(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        roles_mod.delete_role(repo, str(body.get("name", "")))
+        return self.roles_view(str(repo))
+
+    def install_templates(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        roles_mod.install_templates(repo)
+        return self.roles_view(str(repo))
+
+    def save_project(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        roles_mod.save_project_context(repo, body.get("context"))
+        return self.roles_view(str(repo))
+
+    def commit_orchestra(self, body):
+        """Commit .orchestra/ only (roles must be committed: the run preflight needs a clean tree)."""
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        worktree.git(repo, "add", "--", roles_mod.DIR)
+        r = worktree.git(repo, *worktree.IDENT, "commit", "-q", "-m", "orchestra: roles and project context",
+                         "--", roles_mod.DIR, check=False)
+        if r.returncode != 0:
+            raise ValueError(f"git commit failed: {(r.stdout + r.stderr).strip()[:200]}")
+        return self.roles_view(str(repo))
+
     def create_branch(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         if worktree.git(repo, "status", "--porcelain").stdout.strip():
@@ -420,6 +694,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream()
         if path == "/api/templates":
             return self._json(200, {"templates": srv.templates()})
+        if path == "/api/pipeline":
+            return self._json(200, srv.chat.snapshot())
+        if path == "/api/roles":
+            try:
+                repo = parse_qs(urlsplit(self.path).query).get("repo", [""])[0]
+                return self._json(200, srv.roles_view(repo))
+            except ValueError as exc:
+                return self._error(400, str(exc))
         if path.startswith("/api/templates/"):
             try:
                 return self._json(200, srv.load_template(path[len("/api/templates/"):]))
@@ -463,7 +745,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.create_branch(body))
             if path == "/api/templates":
                 return self._json(200, srv.save_template(body))
-        except ValueError as exc:
+            if path == "/api/roles":
+                return self._json(200, srv.save_role(body))
+            if path == "/api/roles/delete":
+                return self._json(200, srv.delete_role(body))
+            if path == "/api/roles/templates":
+                return self._json(200, srv.install_templates(body))
+            if path == "/api/roles/commit":
+                return self._json(200, srv.commit_orchestra(body))
+            if path == "/api/project":
+                return self._json(200, srv.save_project(body))
+            if path == "/api/chat":
+                with srv.lock:
+                    return self._json(*srv.chat.message(body))
+            if path.startswith("/api/pipeline/"):
+                action = path[len("/api/pipeline/"):]
+                if action in ("approve", "pause", "resume", "cancel", "merge", "discard"):
+                    with srv.lock:
+                        return self._json(*getattr(srv.chat, action)())
+        except (ValueError, RuntimeError) as exc:
             return self._error(400, str(exc))
         self._error(404, "not found")
 
