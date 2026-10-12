@@ -191,13 +191,13 @@ def test_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
 
 def test_stream_json_lines_over_64_kib(tmp_path, monkeypatch):
     # A fake claude prints a 200 KiB tool result (e.g. a Read of a large file) between turns.
-    big = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result",
-                                                                "content": "x" * 200_000}]}})
+    # The line is built inside the script: one argv string is capped at 128 KiB on Linux.
     lines = [{"type": "system", "subtype": "init", "model": "fake"},
-             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}}]
-    script = (f"import json, sys; lines = {lines!r}\n"
-              "for l in lines: print(json.dumps(l))\n"
-              f"print({big!r}); print(json.dumps({{'type': 'result', 'result': 'ok'}}))")
+             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+             {"type": "user", "message": {"content": [{"type": "tool_result", "content": "BIG"}]}},
+             {"type": "result", "result": "ok"}]
+    script = (f"import json; lines = {lines!r}\n"
+              "for l in lines: print(json.dumps(l).replace('BIG', 'x' * 200_000))")
     monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
 
     def run_claude():
