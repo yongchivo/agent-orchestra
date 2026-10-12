@@ -1,166 +1,221 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Uno · control</title>
-<link rel="icon" href="data:,">
+<title>Uno</title>
+<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230E0F1A'/%3E%3Cpath d='M20 14v22a12 12 0 0 0 24 0V14' fill='none' stroke='%239A5CF2' stroke-width='9' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="simple">
+<svg width="0" height="0" aria-hidden="true" class="defs">
+  <defs>
+    <linearGradient id="unoGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D24FE8"/><stop offset=".5" stop-color="#9A5CF2"/><stop offset="1" stop-color="#5DB7F4"/>
+    </linearGradient>
+    <symbol id="unoMark" viewBox="0 0 64 64">
+      <path d="M20 14v22a12 12 0 0 0 24 0V14" fill="none" stroke="url(#unoGrad)" stroke-width="9" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
 <header id="top">
-  <span class="brand">◆ Uno</span>
-  <span id="statusText">connecting…</span>
-  <span id="conn">● …</span>
+  <div class="brand" id="brand">
+    <img id="brandImg" class="brand-only" alt="Uno">
+    <span class="neutral neutral-only">
+      <svg class="mark" aria-hidden="true"><use href="#unoMark"/></svg>
+      <span class="word">UNO</span>
+      <span class="by" data-i18n="brand.by">by yongchivo</span>
+    </span>
+  </div>
+  <label class="project">
+    <span data-i18n="project">Proyecto</span>
+    <select id="project"></select>
+  </label>
+  <input id="repo" data-adv list="recent" data-i18n-placeholder="repo.placeholder" autocomplete="off" spellcheck="false">
+  <datalist id="recent"></datalist>
+  <div class="switches">
+    <div class="seg" id="langSeg" role="group" aria-label="language">
+      <button type="button" data-lang="es">ES</button><button type="button" data-lang="en">EN</button>
+    </div>
+    <div class="seg" id="modeSeg" role="group" aria-label="mode">
+      <button type="button" data-mode="simple" data-i18n="mode.simple">Simple</button><button type="button" data-mode="advanced" data-i18n="mode.advanced">Avanzado</button>
+    </div>
+  </div>
+  <span id="conn" class="conn idle"><i class="dot"></i><span id="connText">…</span></span>
 </header>
 
-<main>
-  <section id="newrun" class="panel">
-    <h2>New run</h2>
-    <div class="row">
-      <label class="grow">repository
-        <input id="repo" list="recent" placeholder="/absolute/path/to/repo" autocomplete="off" spellcheck="false">
-        <datalist id="recent"></datalist>
-      </label>
-      <label>backend
-        <select id="backend"><option value="mock">mock</option><option value="claude">claude</option></select>
-      </label>
-      <label>parallel <input id="parallel" type="number" min="1" max="8" value="2"></label>
-    </div>
+<div id="notice" class="notice" role="alert" hidden></div>
 
-    <div id="tasks"></div>
-    <div class="row">
-      <button id="addTask" type="button" class="ghost">+ task</button>
-      <span class="hint">paths: one or more globs, space-separated (required). Agents never commit; the orchestrator does.</span>
+<main id="layout">
+  <section id="chatPanel" class="panel">
+    <h2 data-i18n="chat.title">Orquestador</h2>
+    <div id="projectState" class="pstate"></div>
+    <div id="chat">
+      <div id="chatEmpty" class="empty" data-i18n="chat.empty.project">Elige un proyecto</div>
     </div>
-
-    <div id="checks">
-      <ul id="errors" class="errors"></ul>
-      <ul id="warnings" class="warnings"></ul>
-      <ul id="steering" class="warnings"></ul>
+    <div class="row compose">
+      <input id="chatInput" class="grow" data-i18n-placeholder="chat.placeholder" autocomplete="off">
+      <button id="chatSend" type="button" class="primary" data-i18n="chat.send">Enviar</button>
     </div>
-
-    <div class="row actions">
-      <button id="start" type="button" disabled>Start</button>
-      <button id="stop" type="button" disabled>Stop</button>
-      <button id="branch" type="button" class="ghost" hidden>Create branch</button>
-      <span id="runState" class="hint"></span>
-    </div>
-
-    <div class="row templates">
-      <input id="tplName" placeholder="template-name" autocomplete="off" spellcheck="false">
-      <button id="tplSave" type="button" class="ghost">Save template</button>
-      <select id="tplList"></select>
-      <button id="tplLoad" type="button" class="ghost">Load</button>
-    </div>
-  </section>
-
-  <section id="pipeline" class="panel">
-    <h2>Pipeline <span id="pipeState" class="hint">idle</span></h2>
-    <p class="hint">Talk to the orchestrator: it proposes a plan of role steps (validated by the server), you approve it, the roles hand their work to each other, and nothing reaches your branch until you merge. Uses the repository, backend and parallel fields above.</p>
-    <div class="row">
-      <label>max correction rounds <input id="iters" type="number" min="1" max="5" value="2"></label>
-      <span class="hint">reviewers' medium/high findings go back to the developer at most this many times; then the orchestrator asks you</span>
-    </div>
-    <div id="chat"></div>
-    <div class="row">
-      <input id="chatInput" class="grow" placeholder="Add a function that validates e-mail addresses in utils.py, then have it reviewed" autocomplete="off">
-      <button id="chatSend" type="button">Send</button>
-    </div>
-    <div class="row actions">
-      <button id="pApprove" type="button" disabled>Approve plan</button>
-      <button id="pPause" type="button" class="ghost" disabled>Pause</button>
-      <button id="pResume" type="button" class="ghost" disabled>Resume</button>
-      <button id="pCancel" type="button" class="ghost" disabled>Cancel</button>
+    <div class="row controls">
+      <span id="pipeState" class="hint"></span>
       <span id="pipeInfo" class="hint"></span>
+      <span class="btns">
+        <button id="pPause" type="button" class="ghost" disabled data-i18n="chat.pause">Pausar</button>
+        <button id="pResume" type="button" class="ghost" disabled data-i18n="chat.resume">Reanudar</button>
+        <button id="pCancel" type="button" class="ghost" disabled data-i18n="chat.cancel">Cancelar</button>
+      </span>
     </div>
-    <table id="planTable" hidden>
-      <thead><tr><th>#</th><th>step</th><th>role</th><th>goal</th><th>paths</th><th>after</th><th>status</th><th>round</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="row knobs" data-adv>
+      <label><span data-i18n="chat.backend">backend</span>
+        <select id="backend"><option value="claude">claude</option><option value="mock">mock</option></select>
+      </label>
+      <label><span data-i18n="chat.parallel">paralelo</span> <input id="parallel" type="number" min="1" max="8" value="2"></label>
+      <label><span data-i18n="chat.iters">rondas de corrección</span> <input id="iters" type="number" min="1" max="5" value="2"></label>
+      <span class="hint" data-i18n="chat.iters.hint"></span>
+    </div>
+  </section>
+
+  <section id="agentsPanel" class="panel">
+    <h2><span data-i18n="agents.title">Agentes en vivo</span> <span id="liveTitle" class="hint"></span></h2>
+    <div id="stage">
+      <div id="hero" class="hero">
+        <img id="heroImg" class="brand-only" alt="">
+        <svg class="mark big neutral-only" aria-hidden="true"><use href="#unoMark"/></svg>
+        <span class="hint" data-i18n="agents.empty">Sin ejecución en marcha</span>
+      </div>
+      <div id="agents"></div>
+    </div>
+  </section>
+
+  <section id="reviewPanel" class="panel">
+    <h2><span data-i18n="review.title">Revisión y aprobación</span> <span id="pendingCount" class="badge">0</span></h2>
+    <div id="reviewEmpty" class="empty" data-i18n="review.empty">No hay nada pendiente</div>
     <div id="pipeReview" hidden>
-      <h3>Review before merging</h3>
-      <p class="reminder">Consolidated diff of the integration branch. Merge puts it on your branch; nothing happens without this click.</p>
-      <ul id="pendingFindings" class="warnings"></ul>
+      <h3 data-i18n="review.result">Resultado</h3>
+      <p class="hint" data-i18n="review.result.hint"></p>
+      <h4 data-i18n="review.findings">Hallazgos de los revisores</h4>
+      <ul id="pendingFindings" class="findings"></ul>
+      <h4 data-i18n="review.diff">Cambios</h4>
       <div id="pipeDiff"></div>
-      <pre id="pipeCmds"></pre>
+      <pre id="pipeCmds" data-adv></pre>
       <div class="row actions">
-        <button id="pMerge" type="button">Merge into my branch</button>
-        <button id="pDiscard" type="button" class="ghost">Close session (keep branch)</button>
+        <button id="pMerge" type="button" class="ok" data-i18n="review.merge">Aprobar y fusionar en mi rama</button>
+        <button id="pDiscard" type="button" class="ghost" data-i18n="review.discard">Rechazar (cerrar; la rama se conserva)</button>
+      </div>
+    </div>
+    <div id="planCard" hidden>
+      <h3 data-i18n="review.plan">Plan propuesto</h3>
+      <p id="planSummary" class="summary"></p>
+      <table id="planTable">
+        <thead><tr><th>#</th><th data-i18n="review.col.step">paso</th><th data-i18n="review.col.role">rol</th><th data-i18n="review.col.goal">objetivo</th><th data-i18n="review.col.paths">rutas</th><th data-i18n="review.col.after">tras</th><th data-i18n="review.col.status">estado</th><th data-i18n="review.col.round">ronda</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row actions" id="planActions">
+        <button id="pApprove" type="button" class="primary" data-i18n="review.approve">Aprobar plan</button>
+        <button id="pReject" type="button" class="ghost" data-i18n="review.reject">Rechazar</button>
+        <span class="hint" data-i18n="review.approve.hint"></span>
       </div>
     </div>
   </section>
 
-  <section id="rolesPanel" class="panel">
-    <h2>Roles &amp; project <span id="rolesState" class="hint"></span></h2>
-    <p class="hint">Stored in <code>.uno/</code> of the repository above (agents can read it, never change it). Roles must be committed before a run.</p>
-    <div class="row">
-      <label>role <select id="roleList"></select></label>
-      <button id="roleNew" type="button" class="ghost">+ new role</button>
-      <button id="roleTemplates" type="button" class="ghost">Install templates (developer, security-analyst, architect)</button>
-      <button id="orchestraCommit" type="button" class="ghost" hidden>Commit .uno/</button>
-    </div>
-    <ul id="rolesErrors" class="errors"></ul>
-    <div id="rolesTrust" class="trust" hidden>
-      <p class="reminder">These roles and this project context were not created from this UI, or changed since you confirmed them. Their instructions reach the model. Review them below (select each role), then confirm. Runs on this repository are blocked until you do.</p>
-      <ul id="rolesPreview" class="warnings"></ul>
-      <button id="roleTrust" type="button">I reviewed them: confirm roles</button>
-    </div>
-    <div class="task" id="roleForm">
+  <section id="advanced" data-adv>
+    <section id="newrun" class="panel">
+      <h2 data-i18n="adv.newrun">Ejecución paralela</h2>
+      <p class="hint" data-i18n="adv.newrun.hint"></p>
+      <div id="tasks"></div>
       <div class="row">
-        <label>name <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>
-        <label>preset <select id="r-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select></label>
-        <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
-        <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
+        <button id="addTask" type="button" class="ghost" data-i18n="adv.addTask">+ tarea</button>
       </div>
-      <label>description <input id="r-desc" autocomplete="off"></label>
-      <label>instructions <textarea id="r-instr" rows="4"></textarea></label>
-      <label>expected output format <textarea id="r-format" rows="2"></textarea></label>
-      <label>default paths <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
+      <div id="checks">
+        <ul id="errors" class="errors"></ul>
+        <ul id="warnings" class="warnings"></ul>
+        <ul id="steering" class="warnings"></ul>
+      </div>
       <div class="row actions">
-        <button id="roleSave" type="button">Save role</button>
-        <button id="roleDelete" type="button" class="ghost">Delete</button>
+        <button id="start" type="button" class="primary" disabled data-i18n="adv.start">Iniciar</button>
+        <button id="stop" type="button" class="bad" disabled data-i18n="adv.stop">Detener</button>
+        <span id="runState" class="hint"></span>
       </div>
-    </div>
-    <label>project context (shared with every role) <textarea id="projectCtx" rows="3" placeholder="What this project is, its conventions, what reviewers should care about."></textarea></label>
-    <div class="row actions"><button id="projectSave" type="button" class="ghost">Save project context</button></div>
-  </section>
+      <div class="row templates">
+        <input id="tplName" data-i18n-placeholder="adv.tplName" autocomplete="off" spellcheck="false">
+        <button id="tplSave" type="button" class="ghost" data-i18n="adv.tplSave">Guardar plantilla</button>
+        <select id="tplList"></select>
+        <button id="tplLoad" type="button" class="ghost" data-i18n="adv.tplLoad">Cargar</button>
+      </div>
+    </section>
 
-  <section id="live" class="panel" hidden>
-    <h2>Run <span id="liveTitle" class="hint"></span></h2>
-    <div id="agents"></div>
-    <div id="log"></div>
-  </section>
+    <section id="rolesPanel" class="panel">
+      <h2><span data-i18n="adv.roles">Roles y proyecto</span> <span id="rolesState" class="hint"></span></h2>
+      <p class="hint" data-i18n="adv.roles.hint"></p>
+      <div class="row">
+        <label><span data-i18n="adv.role">rol</span> <select id="roleList"></select></label>
+        <button id="roleNew" type="button" class="ghost" data-i18n="adv.roleNew">+ nuevo rol</button>
+        <button id="roleTemplates" type="button" class="ghost" data-i18n="adv.roleTemplates">Instalar plantillas</button>
+        <button id="orchestraCommit" type="button" class="ghost" hidden data-i18n="adv.commit">Commit de .uno/</button>
+      </div>
+      <ul id="rolesErrors" class="errors"></ul>
+      <div id="rolesTrust" class="trust" hidden>
+        <p class="reminder" data-i18n="adv.trust"></p>
+        <ul id="rolesPreview" class="warnings"></ul>
+        <button id="roleTrust" type="button" class="primary" data-i18n="adv.trust.button">Los he revisado: confirmar roles</button>
+      </div>
+      <div class="task" id="roleForm">
+        <div class="row">
+          <label><span data-i18n="adv.r.name">nombre</span> <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>
+          <label>preset <select id="r-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select></label>
+          <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
+          <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
+        </div>
+        <label><span data-i18n="adv.r.desc">descripción</span> <input id="r-desc" autocomplete="off"></label>
+        <label><span data-i18n="adv.r.instr">instrucciones</span> <textarea id="r-instr" rows="4"></textarea></label>
+        <label><span data-i18n="adv.r.format">formato de salida esperado</span> <textarea id="r-format" rows="2"></textarea></label>
+        <label><span data-i18n="adv.r.paths">rutas por defecto</span> <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
+        <div class="row actions">
+          <button id="roleSave" type="button" class="primary" data-i18n="adv.roleSave">Guardar rol</button>
+          <button id="roleDelete" type="button" class="ghost" data-i18n="adv.roleDelete">Eliminar</button>
+        </div>
+      </div>
+      <label><span data-i18n="adv.project">contexto del proyecto</span> <textarea id="projectCtx" rows="3" data-i18n-placeholder="adv.project.placeholder"></textarea></label>
+      <div class="row actions"><button id="projectSave" type="button" class="ghost" data-i18n="adv.projectSave">Guardar contexto</button></div>
+    </section>
 
-  <section id="results" class="panel" hidden>
-    <h2>Results <span id="resultsTitle" class="hint"></span></h2>
-    <p class="reminder">Review every diff before you ship it. The gate limits where an agent can write, not what it writes.</p>
-    <div id="resultList"></div>
-  </section>
+    <section id="live" class="panel">
+      <h2 data-i18n="adv.log">Registro de eventos</h2>
+      <div id="log"></div>
+    </section>
 
-  <section id="publish" class="panel">
-    <h2>Publish</h2>
-    <div class="row">
-      <a id="ghNew" href="https://github.com/new" target="_blank" rel="noopener noreferrer" class="button">Create repo on GitHub ↗</a>
-      <code id="ghCmd" class="grow">gh repo create &lt;name&gt; --source &lt;path&gt; --private</code>
-      <button id="ghCopy" type="button" class="ghost">copy</button>
-      <span class="hint">The UI never pushes or runs gh: paste this in your terminal.</span>
-    </div>
+    <section id="results" class="panel" hidden>
+      <h2><span data-i18n="adv.results">Resultados</span> <span id="resultsTitle" class="hint"></span></h2>
+      <p class="reminder" data-i18n="adv.results.hint"></p>
+      <div id="resultList"></div>
+    </section>
+
+    <section id="publish" class="panel">
+      <h2 data-i18n="adv.publish">Publicar</h2>
+      <div class="row">
+        <a id="ghNew" href="https://github.com/new" target="_blank" rel="noopener noreferrer" class="button" data-i18n="adv.publish.gh">Crear repositorio en GitHub ↗</a>
+        <code id="ghCmd" class="grow">gh repo create &lt;name&gt; --source &lt;path&gt; --private</code>
+        <button id="ghCopy" type="button" class="ghost" data-i18n="adv.publish.copy">copiar</button>
+        <span class="hint" data-i18n="adv.publish.hint"></span>
+      </div>
+    </section>
   </section>
 </main>
 
 <template id="taskRow">
   <div class="task">
     <div class="row">
-      <label>name <input class="t-name" placeholder="billing" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="adv.t.name">nombre</span> <input class="t-name" placeholder="billing" autocomplete="off" spellcheck="false"></label>
       <label>preset
         <select class="t-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select>
       </label>
       <label>max_turns <input class="t-turns" type="number" min="1" max="50" value="10"></label>
-      <button type="button" class="t-remove ghost">remove</button>
+      <button type="button" class="t-remove ghost" data-i18n="adv.t.remove">quitar</button>
     </div>
-    <label>prompt <textarea class="t-prompt" rows="2" placeholder="Add a one-line docstring to every function in calc.py. Do not change behaviour."></textarea></label>
-    <label>paths <input class="t-paths" placeholder="calc.py src/billing/**" autocomplete="off" spellcheck="false"></label>
+    <label><span data-i18n="adv.t.prompt">instrucción</span> <textarea class="t-prompt" rows="2"></textarea></label>
+    <label><span data-i18n="adv.t.paths">rutas</span> <input class="t-paths" placeholder="calc.py src/billing/**" autocomplete="off" spellcheck="false"></label>
   </div>
 </template>
 

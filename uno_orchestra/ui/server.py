@@ -4,8 +4,10 @@ Single user, loopback only. The server enforces every rule and the page only dis
 them: a random per-start token in a header on every API call (never a cookie or query
 string), Host and Origin validation, JSON-only POST bodies with a size cap, repositories
 restricted to allowed roots, permission presets only, no inline scripts, and automatic
-shutdown after a period of inactivity. The core (orchestra/) is invoked as it is; nothing
-here relaxes a control.
+shutdown after a period of inactivity. Static files (page, script, style, i18n dictionaries)
+come from an allowlist; brand images come from four fixed routes mapped to fixed PNG files
+under <state-dir>/theme/ (signature and size checked, 404 otherwise). The core (orchestra/)
+is invoked as it is; nothing here relaxes a control.
 """
 import asyncio
 import datetime
@@ -21,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from uno_orchestra import config, orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra import __version__, config, orchestrator, pipeline, roles as roles_mod, scope, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
@@ -29,7 +31,21 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/i18n/es.json": ("i18n/es.json", "application/json"),
+    "/i18n/en.json": ("i18n/en.json", "application/json"),
 }
+# Brand images live OUTSIDE the repository (<state-dir>/theme/uno-brand/png/): the package is
+# MIT, the brand is not. Fixed routes to fixed file names, PNG only (signature checked), size
+# capped; anything else is 404 and the page falls back to its neutral mark.
+BRAND_DIR = Path("theme") / "uno-brand" / "png"
+BRAND = {
+    "/brand/lockup.png": "uno-lockup-horizontal-transparent.png",
+    "/brand/mark.png": "uno-mark-512.png",
+    "/brand/favicon.png": "uno-favicon-32.png",
+    "/brand/apple-touch.png": "uno-apple-touch-180.png",
+}
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_BRAND = 1024 * 1024
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
        "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 TOKEN_HEADER = "X-Orchestra-Token"
@@ -107,6 +123,24 @@ def advise(tasks, backend):
         if any(t.max_turns > 20 for t in tasks):
             warnings.append("start small: max_turns above 20 on the claude backend")
     return warnings
+
+
+def brand_asset(state_dir, route):
+    """Bytes of one allow-listed brand PNG, or None (missing, not a regular file inside the brand
+    directory, too big, or not a PNG by signature: an SVG renamed .png is refused)."""
+    name = BRAND.get(route)
+    if name is None:
+        return None
+    root = (Path(state_dir) / BRAND_DIR).resolve()
+    path = root / name
+    try:
+        real = path.resolve(strict=True)
+        if not real.is_relative_to(root) or not real.is_file() or real.stat().st_size > MAX_BRAND:
+            return None
+        data = real.read_bytes()
+    except OSError:
+        return None
+    return data if data[:8] == PNG_MAGIC and data[12:16] == b"IHDR" else None
 
 
 def write_token(state_dir, token):
@@ -404,6 +438,13 @@ class UIServer(ThreadingHTTPServer):
         except (OSError, ValueError):
             return []
 
+    def configured(self):
+        """Recent repositories that have a .uno/ directory (the project selector)."""
+        return [r for r in self.recent_repos() if (Path(r) / roles_mod.DIR).is_dir()]
+
+    def brand(self):
+        return all(brand_asset(self.state_dir, route) is not None for route in BRAND)
+
     def remember_repo(self, repo):
         recent = [str(repo)] + [r for r in self.recent_repos() if r != str(repo)]
         _write_private_json(self.state_dir / "recent-repos.json", recent[:RECENT_MAX])
@@ -580,7 +621,14 @@ class UIServer(ThreadingHTTPServer):
         if error is None and roles_mod.has_legacy_dir(repo):
             error = (f"this repository has a pre-0.1.0 {roles_mod.LEGACY_DIR}/: run `uno init` inside it "
                      f"to rename it to {roles_mod.DIR}/ (roles are read from {roles_mod.DIR}/ only)")
+        ref = worktree.git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).stdout.strip()
+        try:
+            worktree.preflight(repo)
+            preflight = None
+        except RuntimeError as exc:
+            preflight = str(exc)
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
+                "branch": ref or None, "on_main": ref in ("main", "master"), "preflight": preflight,
                 "protected_paths": protected, "truncated": truncated, "references": references, "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
                 "uncommitted": roles_mod.uncommitted(repo, worktree.git),
@@ -712,12 +760,16 @@ class Handler(BaseHTTPRequestHandler):
             name, ctype = STATIC[path]
             return self._send(200, ctype, resources.files(__package__).joinpath(name).read_bytes())
         srv = self.server
+        if path in BRAND:
+            data = brand_asset(srv.state_dir, path)
+            return self._send(200, "image/png", data) if data is not None else self._error(404, "not found")
         if path == "/api/status":
             run = srv.run
             return self._json(200, {
                 "running": srv.running(), "offset": run["offset"] if run else 0,
                 "has_results": bool(run and run.get("results")),
-                "recent_repos": srv.recent_repos(), "templates": srv.templates(),
+                "recent_repos": srv.recent_repos(), "configured": srv.configured(), "templates": srv.templates(),
+                "brand": srv.brand(), "version": __version__,
                 "presets": sorted(PRESETS), "limits": {"parallel": orchestrator.MAX_PARALLEL,
                                                         "tasks": orchestrator.MAX_TASKS},
                 "idle_timeout": srv.idle_timeout, "state_dir": str(srv.state_dir),

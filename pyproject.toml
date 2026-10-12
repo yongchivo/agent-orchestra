@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uno-orchestra"
-version = "0.1.0"
+version = "0.2.0"
 description = "Uno: run locked-down Claude Code agents on a repository, in parallel or as a role pipeline, with a local control UI."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -28,5 +28,5 @@ uno = "uno_orchestra.cli:main"
 include = ["uno_orchestra*"]
 
 [tool.setuptools.package-data]
-"uno_orchestra.ui" = ["*.html", "*.js", "*.css"]
+"uno_orchestra.ui" = ["*.html", "*.js", "*.css", "i18n/*.json"]
 "uno_orchestra.dashboard" = ["*.html"]

@@ -56,7 +56,7 @@ def call(srv, method, path, body=None, token=TOKEN, headers=None, ctype="applica
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     conn.request(method, path, body=data, headers=h)
     r = conn.getresponse()
-    text = r.read().decode()
+    text = r.read().decode(errors="replace")   # brand routes return PNG bytes
     conn.close()
     try:
         parsed = json.loads(text)
@@ -417,7 +417,8 @@ def test_get_and_head_never_modify_state(ui, repo):
                     "/api/chat", f"/api/chat?repo={repo}&message=hi", "/api/pipeline/approve",
                     "/api/pipeline/merge", "/api/pipeline/cancel", "/api/roles/delete",
                     f"/api/roles/templates?repo={repo}", f"/api/roles/commit?repo={repo}", "/api/project"]
-    read_paths = ["/", "/app.js", "/style.css", "/api/status", "/api/results", "/api/templates",
+    read_paths = ["/", "/app.js", "/style.css", "/i18n/es.json", "/i18n/en.json", "/brand/lockup.png",
+                  "/brand/favicon.png", "/api/status", "/api/results", "/api/templates",
                   "/api/templates/seed", "/api/templates/missing", "/api/events?from=0",
                   "/api/pipeline", f"/api/roles?repo={repo}", "/api/roles?repo=/"]
     for method in ("GET", "HEAD"):
@@ -434,3 +435,141 @@ def test_get_and_head_never_modify_state(ui, repo):
     assert git(repo, "rev-parse", "HEAD") == head_before
     assert git(repo, "branch", "--list") == branches_before
     assert git(repo, "status", "--porcelain") == ""
+
+
+# --- phase 5: brand assets, i18n, modes, preferences, palette ------------------------------
+
+PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\xaeB`\x82")
+BRAND_FILES = ("uno-lockup-horizontal-transparent.png", "uno-mark-512.png", "uno-favicon-32.png", "uno-apple-touch-180.png")
+
+
+def brand_dir(ui):
+    d = ui.state_dir / "theme" / "uno-brand" / "png"
+    d.mkdir(parents=True)
+    return d
+
+
+def test_without_a_brand_directory_the_ui_is_neutral(ui):
+    _, status, _ = call(ui, "GET", "/api/status")
+    assert status["brand"] is False and status["version"] == "0.2.0"
+    for route in ("/brand/lockup.png", "/brand/mark.png", "/brand/favicon.png", "/brand/apple-touch.png"):
+        assert call(ui, "GET", route)[0] == 404, route
+    html = (ROOT / "uno_orchestra" / "ui" / "index.html").read_text()
+    assert html.count('class="mark') == 2 and 'neutral-only' in html         # the neutral mark is in the page
+    assert "/brand/" not in html                                           # brand PNGs are only wired in by app.js on brand=true
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    assert "brand(statusData.brand)" in js
+
+
+def test_brand_pngs_are_served_only_from_the_allowlist(ui):
+    d = brand_dir(ui)
+    for name in BRAND_FILES:
+        (d / name).write_bytes(PNG)
+    (d / "uno-mark-1024.png").write_bytes(PNG)        # present on disk, not in the allowlist
+    (d / "secret.txt").write_text("x")
+    _, status, _ = call(ui, "GET", "/api/status")
+    assert status["brand"] is True
+    for route in ("/brand/lockup.png", "/brand/mark.png", "/brand/favicon.png", "/brand/apple-touch.png"):
+        code, body, h = call(ui, "GET", route)
+        assert code == 200 and h["Content-Type"] == "image/png" and h["X-Content-Type-Options"] == "nosniff", route
+        assert h["Content-Security-Policy"].startswith("default-src 'none'")
+    for route in ("/brand/uno-mark-1024.png", "/brand/secret.txt", "/brand/", "/brand/../token",
+                  "/brand/lockup.png/../mark.png", "/theme/uno-brand/png/uno-mark-512.png"):
+        assert call(ui, "GET", route)[0] == 404, route
+    assert call(ui, "HEAD", "/brand/lockup.png")[0] == 200
+
+
+def test_svg_or_oversized_brand_file_is_refused(ui):
+    d = brand_dir(ui)
+    for name in BRAND_FILES:
+        (d / name).write_bytes(PNG)
+    (d / "uno-lockup-horizontal-transparent.png").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>")
+    assert call(ui, "GET", "/brand/lockup.png")[0] == 404                 # not a PNG by signature
+    (d / "uno-mark-512.png").write_bytes(PNG + b"\x00" * (1024 * 1024))
+    assert call(ui, "GET", "/brand/mark.png")[0] == 404                   # above the size cap
+    (d / "uno-favicon-32.png").unlink()
+    (d / "uno-favicon-32.png").symlink_to(ui.state_dir / "token")         # symlink out of the brand dir
+    write_token(ui.state_dir, TOKEN)
+    assert call(ui, "GET", "/brand/favicon.png")[0] == 404
+    _, status, _ = call(ui, "GET", "/api/status")
+    assert status["brand"] is False                                       # one bad file -> neutral page
+    assert call(ui, "GET", "/brand/apple-touch.png")[0] == 200            # the valid ones still serve
+
+
+def test_i18n_dictionaries_are_static_and_rendered_as_text(ui):
+    dicts = {}
+    for lang in ("es", "en"):
+        code, body, h = call(ui, "GET", f"/i18n/{lang}.json")
+        assert code == 200 and h["Content-Type"] == "application/json" and h["Content-Security-Policy"]
+        assert isinstance(body, dict) and body
+        dicts[lang] = body
+    assert set(dicts["es"]) == set(dicts["en"])
+    assert all(isinstance(v, str) for d in dicts.values() for v in d.values())
+    assert call(ui, "GET", "/i18n/fr.json")[0] == 404 and call(ui, "GET", "/i18n/../app.js")[0] == 404
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    # Dictionary values reach the page through textContent or placeholder only: a value such as
+    # "<b>x</b>" is shown literally. The forbidden sinks are checked in the XSS test above.
+    assert "n.textContent = t(n.dataset.i18n)" in js and "n.placeholder = t(n.dataset.i18nPlaceholder)" in js
+    assert "innerHTML" not in js
+    html = (ROOT / "uno_orchestra" / "ui" / "index.html").read_text()
+    assert html.count('<html lang="es">') == 1                            # Spanish by default
+
+
+def test_simple_mode_is_a_css_class_and_changes_no_permission_or_limit(ui, repo):
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    assert "document.body.classList.toggle('simple', simple)" in js
+    # Whatever the page claims about its mode, the server enforces the same rules and limits.
+    for extra in ({}, {"mode": "simple"}, {"mode": "advanced"}):
+        bad = {"repo": str(repo), "backend": "mock", "parallel": 99, "message": "hi", **extra}
+        assert call(ui, "POST", "/api/chat", bad)[0] == 400
+        f = form(repo, "a")
+        f["tasks"][0]["preset"] = "shell"
+        f.update(extra)
+        assert call(ui, "POST", "/api/start", f)[0] == 400
+        f = form(repo, "a")
+        f["tasks"][0]["mode"] = "simple"
+        _, body, _ = call(ui, "POST", "/api/check", f)
+        assert any("unknown fields" in e for e in body["errors"])
+
+
+def test_localstorage_never_holds_the_token():
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    writes = re.findall(r"localStorage\.setItem\(([^)]*)\)", js)
+    assert writes == ["PREFS[key], value"]                                 # one writer, fixed keys
+    keys = re.search(r"const PREFS = \{([^}]*)\}", js).group(1)
+    assert sorted(re.findall(r"'([a-z.]+)'", keys)) == ["uno.lang", "uno.mode", "uno.repo"]
+    for call_ in re.findall(r"pref\('(\w+)', ([^)]*)\)", js):
+        assert call_[0] in ("lang", "mode", "repo") and "token" not in call_[1], call_
+    assert "sessionStorage" not in js and "document.cookie" not in js and "indexedDB" not in js
+
+
+def test_csp_is_unchanged_or_stricter(ui):
+    baseline = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+                "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    for path, token in (("/", None), ("/i18n/es.json", None), ("/api/status", TOKEN), ("/brand/mark.png", None)):
+        _, _, h = call(ui, "GET", path, token=token)
+        assert h["Content-Security-Policy"] == baseline, path
+    html = (ROOT / "uno_orchestra" / "ui" / "index.html").read_text()
+    css = (ROOT / "uno_orchestra" / "ui" / "style.css").read_text()
+    assert "http" not in css and "@import" not in css and "url(" not in css          # nothing external, no font files
+    assert not re.search(r"<link[^>]+href=\"http", html) and " style=" not in html   # no inline styles either
+
+
+def _contrast(fg, bg):
+    def lum(hex_):
+        rgb = [int(hex_[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    a, b = lum(fg), lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def test_status_colours_meet_wcag_aa_on_the_background():
+    css = (ROOT / "uno_orchestra" / "ui" / "style.css").read_text()
+    var = lambda name: re.search(rf"--{name}: (#[0-9A-Fa-f]{{6}})", css).group(1)
+    bg = var("bg")
+    for name in ("ok", "warn", "bad", "text", "dim", "sky"):
+        assert _contrast(var(name), bg) >= 4.5, (name, _contrast(var(name), bg))
+    assert {var("ok"), var("warn"), var("bad")}.isdisjoint({var("magenta"), var("violet"), var("sky")})
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    assert "STATUS_ICON" in js and "t('status.' +" in js                   # icon + text, never colour alone

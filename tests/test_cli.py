@@ -386,14 +386,14 @@ def test_wheel_installs_in_a_clean_venv_and_serves_the_ui(tmp_path):
     dist = tmp_path / "dist"
     subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "-q", "-w", str(dist), str(ROOT)],
                    check=True, cwd=tmp_path, timeout=600)
-    wheel, = dist.glob("uno_orchestra-0.1.0-*.whl")
+    wheel, = dist.glob("uno_orchestra-0.2.0-*.whl")
     venv = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, timeout=120)
     pip = venv / "bin" / "pip"
     subprocess.run([str(pip), "install", "-q", "--no-deps", str(wheel)], check=True, cwd=tmp_path, timeout=300)
     uno = venv / "bin" / "uno"
     out = subprocess.run([str(uno), "--version"], capture_output=True, text=True, check=True, cwd=tmp_path)
-    assert out.stdout.strip() == "uno 0.1.0"
+    assert out.stdout.strip() == "uno 0.2.0"
     where = subprocess.run([str(venv / "bin" / "python"), "-c", "import uno_orchestra; print(uno_orchestra.__file__)"],
                            capture_output=True, text=True, check=True, cwd=tmp_path).stdout
     assert "site-packages" in where                          # the installed copy, not the checkout
@@ -436,7 +436,7 @@ def test_cli_defaults_to_ui_and_has_help_per_subcommand(capsys):
         assert exc.value.code == 0 and "usage: uno" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         cli.main(["--version"])
-    assert capsys.readouterr().out.strip() == "uno 0.1.0"
+    assert capsys.readouterr().out.strip() == "uno 0.2.0"
     parser = cli.build_parser()
     assert parser.parse_args(["ui", "--no-browser"]).cmd == "ui"
     assert cli.main.__module__ == "uno_orchestra.cli"
