@@ -229,10 +229,18 @@ def project_context(repo):
 
 
 def project_protected(repo):
+    """What the gate applies on top of scope.PROTECTED: the project's protected_paths plus every
+    referenced document (an agent must not rewrite the instructions the other agents read)."""
+    files = snapshot(repo)
     try:
-        return project_protected_from(snapshot(repo))
+        protected = project_protected_from(files)
     except ValueError:
         return []   # a broken file protects nothing extra; load_confirmed() reports it
+    try:
+        refs = project_references_from(files, repo)
+    except ValueError:
+        refs = []
+    return list(dict.fromkeys(protected + refs))
 
 
 def _save_project(repo, **fields):

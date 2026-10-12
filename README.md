@@ -76,7 +76,8 @@ and the Roles & project panel both report it. Referenced documents are validated
 `.uno/project.json` is loaded (relative paths inside the repository, no `..`, no symlink leaving
 it, `.md`/`.txt` only, never a protected or credential file) and their content is part of the
 trust fingerprint: if one changes, the UI asks you to confirm again, exactly as for a role, and
-every run re-checks it when it starts. The roles it writes are recorded as confirmed by you
+every run re-checks it when it starts. They are also protected from the agents: a change to a
+referenced document is `needs_review`, like a change to any protected path. The roles it writes are recorded as confirmed by you
 (the same fingerprint the UI uses, in `~/.uno-orchestra/trust.json`). Running it again does
 nothing; `uno init --force` regenerates the proposed roles after asking (roles you added are kept).
 In a folder that is not a repository it offers `git init` plus an initial commit.
