@@ -296,9 +296,9 @@ class Worker:
             try:
                 raw = await proc.stdout.readline()
             except (ValueError, asyncio.LimitOverrunError):
-                # readline already dropped the oversized line, or a STREAM_LIMIT chunk of it (one
-                # warning per chunk; a leftover tail fails to parse below). A lost result line leaves output unset,
-                # so a reviewer still fails as "malformed findings" instead of passing.
+                # readline already dropped the oversized line, or a STREAM_LIMIT chunk of it
+                # (one warning per chunk; a leftover tail fails to parse below). A lost result
+                # line leaves output unset, so a reviewer fails as "malformed findings".
                 self.bus.emit(self.name, "warning", f"dropped a stream-json line over the {STREAM_LIMIT}-byte limit")
                 continue
             if not raw:
