@@ -790,6 +790,10 @@ the name prefilled; Uno never creates roles by itself.
 `~/.uno-orchestra/prompts/templates/<name>/<N>.json`, a personal version shadows the built-in
 of the same name, and deleting your versions restores it. Templates never carry a model.
 
+Two complete outputs (a Fix prompt in Spanish and a Create prompt in English, generated on a
+fictional three-file Flask app, clarification questions skipped) are in
+[docs/prompt-studio-examples.md](docs/prompt-studio-examples.md).
+
 | Control | Test |
 |---------|------|
 | Clarification and output schemas validated field by field | `test_clarification_schema_is_validated`, `test_output_schema_is_validated_field_by_field` |
