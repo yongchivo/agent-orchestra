@@ -44,17 +44,23 @@ FINDINGS_SCHEMA = {
 SENSITIVE_DIRS = ["~/.ssh", "~/.aws", "~/.config/gh", "~/.gnupg", "~/Library/Keychains"]
 
 # The subprocess environment is built from this allowlist: no GITHUB_TOKEN, AWS_*, ...
-# and none of the CLAUDE* variables a parent Claude Code session exports.
+# and none of the CLAUDE* variables a parent Claude Code session exports. The agents use the
+# Claude CLI's own login (CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_CONFIG_DIR are part of it).
 ENV_ALLOWLIST = (
     "PATH", "HOME", "LANG", "TERM", "USER", "TMPDIR",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR",
 )
+# Passed only with `uno config set auth api-key`: never by the mere presence of the variable.
+API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+AUTH_MODES = ("account", "api-key")
 
 
-def agent_env(environ=None):
+def agent_env(environ=None, auth="account"):
     environ = os.environ if environ is None else environ
-    return {k: v for k, v in environ.items() if k in ENV_ALLOWLIST}
+    if auth not in AUTH_MODES:
+        raise ValueError(f"auth must be one of {list(AUTH_MODES)}")
+    allowed = ENV_ALLOWLIST + (API_KEY_ENV if auth == "api-key" else ())
+    return {k: v for k, v in environ.items() if k in allowed}
 
 
 def agent_settings():
@@ -123,8 +129,9 @@ class Task:
 
 class Worker:
     def __init__(self, task, workdir, branch, bus: EventBus, backend="claude",
-                 timeout=900, config_dir=None):
+                 timeout=900, config_dir=None, auth="account"):
         self.task = task
+        self.auth = auth
         self.workdir = workdir
         self.branch = branch
         self.bus = bus
@@ -192,7 +199,7 @@ class Worker:
 
     def command(self, env=None):
         """Headless CLI invocation. Every flag below exists in Claude Code 2.1.296."""
-        env = agent_env() if env is None else env
+        env = agent_env(auth=self.auth) if env is None else env
         tools = ",".join(self.task.tools)
         cmd = [
             "claude", "-p", self.task.prompt,
@@ -211,7 +218,7 @@ class Worker:
         ]
         if self.task.output == "findings":
             cmd += ["--json-schema", json.dumps(FINDINGS_SCHEMA)]
-        if "ANTHROPIC_API_KEY" in env:
+        if self.auth == "api-key" and "ANTHROPIC_API_KEY" in env:
             # Skips hooks, skills, plugins, .mcp.json and the repository's CLAUDE.md. It only
             # works with API-key auth (bare mode never reads OAuth or the keychain).
             cmd.append("--bare")
@@ -219,7 +226,7 @@ class Worker:
 
     async def _run_claude(self):
         self.proc = await asyncio.create_subprocess_exec(
-            *self.command(), cwd=str(self.workdir), env=agent_env(),
+            *self.command(), cwd=str(self.workdir), env=agent_env(auth=self.auth),
             start_new_session=True,  # own process group: terminate() can kill the whole tree
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

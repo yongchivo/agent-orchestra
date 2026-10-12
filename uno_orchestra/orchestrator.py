@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import scope, state, worktree
+from . import config, roles as roles_mod, scope, state, worktree
 from .bus import EventBus
 from .worker import Task, Worker, write_agent_config
 
@@ -33,6 +33,7 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
     branch = worktree.preflight(repo)
     base = worktree.head(repo)
     steering = worktree.agent_instruction_files(repo)
+    protected = roles_mod.project_protected(repo)   # only adds restrictions: no trust needed
     if steering:
         # Only --bare (API-key auth) keeps these out of the model's context. See README.
         msg = ("the repository contains agent instruction files that may reach the model: "
@@ -47,9 +48,10 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
         _mkdir_private(d)
     config_dir = run_dir / "_config"  # "_" is not a valid task name character: no clash
     write_agent_config(config_dir)
+    auth = config.auth_mode(state_dir)
 
     bus.emit("orchestrator", "run_start", f"{len(tasks)} workers on {branch}",
-             run_id=run_id, workers=names, backend=backend)
+             run_id=run_id, workers=names, backend=backend, auth=auth)
 
     workers = []
     summary = {}
@@ -57,7 +59,7 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
         # Worktrees are created sequentially: concurrent `git worktree add` can race on git's lock.
         for t in tasks:
             path, br = worktree.create(repo, run_dir, run_id, t.name)
-            workers.append(Worker(t, path, br, bus, backend, timeout, config_dir))
+            workers.append(Worker(t, path, br, bus, backend, timeout, config_dir, auth=auth))
 
         sem = asyncio.Semaphore(max_parallel)
 
@@ -73,7 +75,8 @@ async def run(repo, tasks, bus: EventBus, backend="claude", max_parallel=3,
                 summary[w.name] = "failed"
                 continue
             verdict, detail = scope.check(worktree.changes(repo, base, w.branch), w.task.paths,
-                                          read=lambda path, b=w.branch: worktree.show(repo, b, path))
+                                          read=lambda path, b=w.branch: worktree.show(repo, b, path),
+                                          protected=protected)
             if verdict != "ok":
                 summary[w.name] = verdict
                 bus.emit("orchestrator", verdict, detail[:300], target=w.name, branch=w.branch)

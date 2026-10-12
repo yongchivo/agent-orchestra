@@ -278,9 +278,11 @@
     $('rolesTrust').hidden = !untrusted;
     if (untrusted) setList($('rolesPreview'), (rolesData.roles || []).map(r =>
       `${r.name} · ${r.preset} · ${r.output} · paths ${r.paths.join(' ')} — ${r.description} — instructions: ${r.instructions}`)
-      .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : []));
+      .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : [])
+      .concat((rolesData.references || []).map(r => `referenced document (hashed with the roles, protected from the agents): ${r.path} · ${r.size} characters`)));
     $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
-      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '');
+      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
+      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
   }
   async function loadRoles() {
     const repo = $('repo').value.trim(); if (!repo) return;

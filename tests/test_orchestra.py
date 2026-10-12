@@ -123,9 +123,11 @@ def test_bash_is_never_available(tmp_path):
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert cmd[cmd.index("--permission-prompts") + 1] == "none"
     assert "--no-session-persistence" in cmd and "--disable-slash-commands" in cmd
-    assert "--bare" not in cmd and "--bare" in Worker(
-        T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=tmp_path
-    ).command(env={"ANTHROPIC_API_KEY": "x"})
+    assert "--bare" not in cmd
+    key = {"ANTHROPIC_API_KEY": "x"}
+    assert "--bare" not in Worker(T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=tmp_path).command(env=key)
+    assert "--bare" in Worker(T("x"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), config_dir=tmp_path,
+                              auth="api-key").command(env=key)
 
 
 def test_mcp_servers_and_repo_settings_are_disabled(tmp_path):
@@ -151,13 +153,17 @@ def test_mcp_servers_and_repo_settings_are_disabled(tmp_path):
 # --- 2. subprocess environment -----------------------------------------------------------
 
 def test_agent_env_is_an_allowlist():
-    env = agent_env({
+    environ = {
         "PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm", "ANTHROPIC_API_KEY": "k",
+        "ANTHROPIC_BASE_URL": "http://proxy", "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "GITHUB_TOKEN": "ghp_x", "AWS_SECRET_ACCESS_KEY": "s", "OPENAI_API_KEY": "o",
         "CLAUDECODE": "1", "CLAUDE_CODE_SIMPLE": "1", "SSH_AUTH_SOCK": "/s",
-    })
-    assert env == {"PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm",
-                   "ANTHROPIC_API_KEY": "k"}
+    }
+    base = {"PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm", "CLAUDE_CODE_OAUTH_TOKEN": "oauth"}
+    assert agent_env(environ) == base                                    # account: the key is NOT passed
+    assert agent_env(environ, auth="api-key") == {**base, "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": "http://proxy"}
+    with pytest.raises(ValueError):
+        agent_env(environ, auth="both")
 
 
 # --- 3. limits: wall-clock timeout kills the whole process group -------------------------

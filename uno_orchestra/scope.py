@@ -37,7 +37,10 @@ def in_scope(path, globs):
     return any(_glob_re(g).match(path) for g in globs)
 
 
-def is_protected(path):
+def is_protected(path, extra=()):
+    """PROTECTED (names and directories at any depth) plus a project's own globs (full path)."""
+    if any(_glob_re(g).match(path) for g in extra):
+        return True
     parts = path.split("/")
     for pat in PROTECTED:
         if pat.endswith("/"):
@@ -53,11 +56,12 @@ def secret_lines(text):
     return [i for i, line in enumerate(text.splitlines(), 1) if SECRET_RE.search(line)]
 
 
-def check(changes, globs, read=None):
+def check(changes, globs, read=None, protected=()):
     """Return (verdict, detail): verdict is "ok", "out_of_scope" or "needs_review".
 
     `read(path)` returns the file's new content as bytes; when given, text files are
-    scanned for secrets with the same patterns the event log redacts.
+    scanned for secrets with the same patterns the event log redacts. `protected` are the
+    project's own globs from .uno/project.json, applied on top of PROTECTED.
     """
     outside = [c["path"] for c in changes if not in_scope(c["path"], globs)]
     if outside:
@@ -65,7 +69,7 @@ def check(changes, globs, read=None):
     review = []
     for c in changes:
         name = c["path"].rsplit("/", 1)[-1]
-        if is_protected(c["path"]):
+        if is_protected(c["path"], protected):
             review.append(f"{c['path']} (protected)")
         elif c["mode"] == SYMLINK_MODE:
             review.append(f"{c['path']} (symlink)")

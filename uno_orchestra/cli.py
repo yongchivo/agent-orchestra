@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import __version__, state
 
-COMMANDS = ("init", "ui", "run", "doctor", "dashboard")
+COMMANDS = ("init", "ui", "run", "doctor", "dashboard", "config")
 
 
 def _common(p):
@@ -64,6 +64,14 @@ def build_parser():
     s = _common(sub.add_parser("doctor", help="check the installation and the project in PATH; explain how to fix each failure"))
     s.add_argument("path", nargs="?", default=".", help="project to check (default: current directory)")
 
+    s = _common(sub.add_parser("config", help="show or change settings in <state-dir>/config.json (auth: account | api-key)",
+                               description="`uno config` shows every setting; `uno config get KEY`; `uno config set KEY VALUE`. "
+                                           "auth=account (default) uses the Claude CLI login and never passes ANTHROPIC_API_KEY "
+                                           "to the agents; auth=api-key passes it and runs the agents with --bare."))
+    s.add_argument("action", nargs="?", choices=["get", "set"], help="get or set (omit to show everything)")
+    s.add_argument("key", nargs="?")
+    s.add_argument("value", nargs="?")
+
     s = _common(sub.add_parser("dashboard", help="live dashboard tailing the event log (read-only)"))
     from .dashboard.server import add_arguments
     add_arguments(s)
@@ -81,7 +89,8 @@ def main(argv=None):
             print(f"uno: migrated ~/{state.LEGACY} to {migrated}", file=sys.stderr)
     state_dir = Path(args.state_dir or state.default_dir())
     try:
-        return {"init": cmd_init, "ui": cmd_ui, "run": cmd_run, "doctor": cmd_doctor, "dashboard": cmd_dashboard}[args.cmd](args, state_dir)
+        return {"init": cmd_init, "ui": cmd_ui, "run": cmd_run, "doctor": cmd_doctor, "dashboard": cmd_dashboard,
+                "config": cmd_config}[args.cmd](args, state_dir)
     except (ValueError, RuntimeError, OSError) as exc:
         sys.exit(f"uno: error: {exc}")
     except KeyboardInterrupt:
@@ -92,6 +101,25 @@ def cmd_init(args, state_dir):
     from . import init
     ask = (lambda q, d: d) if args.yes else None
     return init.run(args.path, state_dir, ask=ask, force=args.force)
+
+
+def cmd_config(args, state_dir):
+    from . import config
+    if args.action == "set":
+        if not args.key or args.value is None:
+            raise ValueError("usage: uno config set KEY VALUE")
+        data = config.set_value(state_dir, args.key, args.value)
+        print(f"{args.key} = {data[args.key]}  ({state_dir / config.FILE})")
+        return 0
+    data = config.load(state_dir)
+    if args.action == "get":
+        if args.key not in data:
+            raise ValueError(f"unknown setting {args.key!r}: use one of {sorted(data)}")
+        print(data[args.key])
+        return 0
+    for k, v in data.items():
+        print(f"{k} = {v}   (choices: {', '.join(config.CHOICES[k])})")
+    return 0
 
 
 def cmd_doctor(args, state_dir):
