@@ -377,13 +377,14 @@
     if (scroll) { setMode('advanced'); $('results').scrollIntoView({ behavior: 'smooth' }); }
   }
 
-  // --- roles & project context (.uno/ in the repository) ----------------------------
+  // --- roles (dialog, both modes) & project context (.uno/ in the repository) --------------
   let rolesData = { roles: [] };
   const R = { name: 'r-name', preset: 'r-preset', output: 'r-output', max_turns: 'r-turns',
               description: 'r-desc', instructions: 'r-instr', output_format: 'r-format', paths: 'r-paths' };
   function fillRole(role) {
     const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [] };
     for (const [k, id] of Object.entries(R)) $(id).value = k === 'paths' ? (r.paths || []).join(' ') : (r[k] ?? '');
+    $('r-newname').value = '';
   }
   function readRole() {
     const r = {};
@@ -395,10 +396,13 @@
   function renderRoles() {
     const sel = $('roleList'); const current = sel.value; clear(sel);
     sel.appendChild(el('option', '', '(new)')).value = '';
-    (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset} · ${r.output}`); o.value = r.name; sel.appendChild(o); });
+    (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset}`); o.value = r.name; sel.appendChild(o); });
     if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    const lib = $('libList'); const curLib = lib.value; clear(lib);
+    (rolesData.library || []).forEach(x => { const o = el('option', '', `${x.name} · ${t(x.builtin ? 'roles.builtin' : 'roles.mine')}`); o.value = x.name; lib.appendChild(o); });
+    if ([...lib.options].some(o => o.value === curLib)) lib.value = curLib;
+    $('rolesCount').textContent = t('roles.count', { n: (rolesData.roles || []).length, max: rolesData.max_roles || 12 });
     $('projectCtx').value = rolesData.project_context || '';
-    $('roleTemplates').disabled = !(rolesData.templates || []).length;
     $('orchestraCommit').hidden = !(rolesData.uncommitted || []).length;
     setList($('rolesErrors'), rolesData.error ? [rolesData.error] : []);
     const untrusted = rolesData.trusted === false && !rolesData.error;
@@ -410,6 +414,7 @@
     $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
       ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
       Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
+    $('rolesOpen').disabled = !$('repo').value.trim();
     renderProjectState();
   }
   async function loadRoles() {
@@ -420,14 +425,41 @@
     renderRoles(); renderPipeline();
   }
   async function rolesPost(path, body) {
-    try { rolesData = await api(path, { repo: $('repo').value.trim(), ...body }); renderRoles(); }
-    catch (e) { setList($('rolesErrors'), [e.message]); }
+    try { rolesData = await api(path, { repo: $('repo').value.trim(), ...body }); renderRoles(); return true; }
+    catch (e) { setList($('rolesErrors'), [e.message]); return false; }
   }
-  $('roleList').addEventListener('change', () => fillRole((rolesData.roles || []).find(r => r.name === $('roleList').value)));
-  $('roleNew').addEventListener('click', () => { $('roleList').value = ''; fillRole(null); });
-  $('roleSave').addEventListener('click', () => rolesPost('/api/roles', { role: readRole() }).then(() => { $('roleList').value = readRole().name; }));
-  $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(t('adv.roleDelete.confirm', { name: n }))) rolesPost('/api/roles/delete', { name: n }).then(() => fillRole(null)); });
-  $('roleTemplates').addEventListener('click', () => rolesPost('/api/roles/templates', {}));
+  const currentRole = () => (rolesData.roles || []).find(r => r.name === $('roleList').value);
+  function openRoles() {
+    if (!$('repo').value.trim()) { setList($('rolesErrors'), [t('roles.noproject')]); return; }
+    loadRoles().then(() => { fillRole(currentRole()); $('rolesDialog').showModal(); });
+  }
+  $('rolesOpen').addEventListener('click', openRoles);
+  $('rolesOpen2').addEventListener('click', openRoles);
+  $('roleList').addEventListener('change', () => fillRole(currentRole()));
+  $('roleNew').addEventListener('click', () => { $('roleList').value = ''; fillRole(null); $('r-name').focus(); });
+  $('roleDup').addEventListener('click', () => { const r = currentRole(); if (!r) return; $('roleList').value = ''; fillRole({ ...r, name: '' }); $('r-name').focus(); });
+  $('roleSave').addEventListener('click', () => { const r = readRole(); rolesPost('/api/roles', { role: r }).then(ok => { if (ok) { $('roleList').value = r.name; fillRole(currentRole()); } }); });
+  $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(t('adv.roleDelete.confirm', { name: n }))) rolesPost('/api/roles/delete', { name: n }).then(ok => { if (ok) fillRole(null); }); });
+  $('roleRename').addEventListener('click', () => {
+    const name = $('roleList').value, next = $('r-newname').value.trim(); if (!name || !next) return;
+    rolesPost('/api/roles/rename', { name, new_name: next }).then(ok => { if (ok) { $('roleList').value = next; fillRole(currentRole()); } });
+  });
+  $('roleFromTpl').addEventListener('click', () => {
+    const template = $('libList').value; if (!template) return;
+    let name = template;
+    if ((rolesData.roles || []).some(r => r.name === template)) { name = prompt(t('roles.copyName'), template + '-2'); if (!name) return; }
+    rolesPost('/api/roles/from-template', { template, name }).then(ok => { if (ok) { $('roleList').value = name; fillRole(currentRole()); } });
+  });
+  $('roleTplSave').addEventListener('click', async () => {
+    try { const r = await api('/api/role-templates', { role: readRole() }); rolesData.library = r.library; renderRoles(); setList($('rolesErrors'), []); }
+    catch (e) { setList($('rolesErrors'), [e.message]); }
+  });
+  $('tplDelete').addEventListener('click', async () => {
+    const name = $('libList').value; if (!name || !confirm(t('roles.confirmDeleteTpl', { name }))) return;
+    try { const r = await api('/api/role-templates/delete', { name }); rolesData.library = r.library; renderRoles(); }
+    catch (e) { setList($('rolesErrors'), [e.message]); }
+  });
+  $('rolesDialog').addEventListener('close', () => { runCheck(); refreshPipeline(); });
   $('projectSave').addEventListener('click', () => rolesPost('/api/project', { context: $('projectCtx').value }));
   $('roleTrust').addEventListener('click', () => rolesPost('/api/roles/trust', {}).then(runCheck));
   $('orchestraCommit').addEventListener('click', () => { if (confirm(t('adv.commit.confirm'))) rolesPost('/api/roles/commit', {}); });

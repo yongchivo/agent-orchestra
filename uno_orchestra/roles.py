@@ -23,6 +23,8 @@ ROLE_FIELDS = {"name", "description", "instructions", "preset", "paths", "output
                "output_format", "max_turns"}
 MAX_TEXT = {"description": 300, "instructions": 4000, "output_format": 1000}
 MAX_PATHS = 20
+MAX_ROLES = 12
+TEMPLATES_DIR = "role-templates"   # personal library, in the state directory (outside any repository)
 MAX_CONTEXT = 4000
 MAX_PROTECTED = 50
 MAX_REFERENCES = 20
@@ -167,7 +169,24 @@ def load_roles(repo):
 def save_role(repo, role):
     d = roles_dir(repo)
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{role.name}.json").write_text(json.dumps(asdict(role), indent=2) + "\n", encoding="utf-8")
+    path = d / f"{role.name}.json"
+    if not path.exists() and len(list(d.glob("*.json"))) >= MAX_ROLES:
+        raise ValueError(f"at most {MAX_ROLES} roles per project")
+    path.write_text(json.dumps(asdict(role), indent=2) + "\n", encoding="utf-8")
+
+
+def rename_role(repo, old, new):
+    """Same role under a new name; the file follows (the name is the file name)."""
+    if not NAME_RE.match(old or "") or not NAME_RE.match(new or ""):
+        raise ValueError("invalid role name: use a-z, 0-9 and '-'")
+    d = roles_dir(repo)
+    if not (d / f"{old}.json").is_file():
+        raise ValueError("no such role")
+    if (d / f"{new}.json").exists():
+        raise ValueError(f"a role named {new!r} already exists")
+    role = role_from_json(json.loads((d / f"{old}.json").read_text(encoding="utf-8")))
+    save_role(repo, Role(**{**asdict(role), "name": new}))
+    (d / f"{old}.json").unlink()
 
 
 def delete_role(repo, name):
@@ -309,6 +328,71 @@ TEMPLATES = [
         preset="readonly", paths=["**"], output="findings", output_format=FINDINGS_FORMAT,
         max_turns=15),
 ]
+
+
+LIBRARY = TEMPLATES + [
+    Role(
+        name="tester",
+        description="Writes and updates tests for the change it is given. Never commits.",
+        instructions=(
+            "Extend the project's test suite, following its existing test framework and style. Cover "
+            "the behaviour described in the task and the diff you are given: expected cases, edge "
+            "cases and failure cases. Only change files inside your paths; never touch .uno/, CI, "
+            "build or dependency files, and do not commit. Do not weaken or delete existing tests "
+            "to make them pass."),
+        preset="edit", paths=["tests/**", "test/**"], output="text",
+        output_format="A short summary: which tests you added or changed and what each one covers.",
+        max_turns=20),
+]
+
+
+# --- personal template library: <state-dir>/role-templates/<name>.json (0600, outside repos) ---
+
+def templates_dir(state_dir):
+    return Path(state_dir) / TEMPLATES_DIR
+
+
+def library(state_dir):
+    """{name: (Role, builtin)}: the built-in roles plus the user's own templates, which shadow a
+    built-in of the same name. A file that does not validate is skipped (the library is in
+    the user's 0700 state directory, but the same strict schema applies)."""
+    out = {t.name: (t, True) for t in LIBRARY}
+    d = templates_dir(state_dir)
+    if d.is_dir():
+        for path in sorted(d.glob("*.json")):
+            try:
+                role = role_from_json(json.loads(path.read_text(encoding="utf-8")))
+                if role.name == path.stem:
+                    out[role.name] = (role, False)
+            except (ValueError, UnicodeDecodeError, OSError):
+                continue
+    return out
+
+
+def save_template(state_dir, role):
+    d = templates_dir(state_dir)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    fd = os.open(d / f"{role.name}.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(role), indent=2) + "\n")
+
+
+def delete_template(state_dir, name):
+    if not NAME_RE.match(name or ""):
+        raise ValueError("invalid template name")
+    path = templates_dir(state_dir) / f"{name}.json"
+    if not path.is_file():
+        raise ValueError("no such personal template (built-in templates cannot be deleted)")
+    path.unlink()
+
+
+def role_from_template(state_dir, template, name=None):
+    """A new Role copied from a library template, optionally under another name."""
+    entry = library(state_dir).get(template or "")
+    if entry is None:
+        raise ValueError("no such template")
+    return Role(**{**asdict(entry[0]), "name": name or entry[0].name})
 
 
 def install_templates(repo):

@@ -47,6 +47,19 @@ third-party dependencies.
   server is gone, with the instruction to run `uno` again.
 - **Preferences** (language, mode, last project) in `localStorage`; the token never is (it
   stays in memory, read once from the URL fragment, which also accepts `lang=` and `mode=`).
+- **Role management from both modes.** A "Roles" button always in the header opens a dialog:
+  create a role (from scratch, by duplicating one, or from a template), rename it, edit every
+  field, delete it (with confirmation) and save it as a template. Simple mode shows four
+  plain fields (name, what it does, can modify files or read-only, which folders); Advanced
+  adds description, output, output format and `max_turns`. A role used by a plan that is
+  proposed or running cannot be renamed or deleted until it finishes or is cancelled.
+- **Personal template library** in `~/.uno-orchestra/role-templates/` (outside any
+  repository, 0600): the four built-in roles (developer, tester, security-analyst,
+  architect) plus your own; "Add from template" in any project, "Save as template" from any
+  role. `uno init` also offers a [n]ew role (the same four questions) and roles from the
+  library after the proposals. Limits unchanged or new: names by the same regex, presets
+  only, validated paths, protected paths for every role, at most 12 roles per project; UI
+  changes are confirmed in the fingerprint, manual edits in the repository still ask.
 - `/api/status` reports `brand`, `configured` (recent repositories with `.uno/`) and
   `version`; `/api/roles` reports the branch, whether it is `main`/`master` and the preflight
   result, so the page needs one call per project.

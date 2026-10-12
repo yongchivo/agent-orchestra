@@ -628,7 +628,9 @@ class UIServer(ThreadingHTTPServer):
         except RuntimeError as exc:
             preflight = str(exc)
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
-                "branch": ref or None, "on_main": ref in ("main", "master"), "preflight": preflight,
+                "library": [{"name": n, "builtin": b, "description": r.description, "preset": r.preset}
+                            for n, (r, b) in roles_mod.library(self.state_dir).items()],
+                "max_roles": roles_mod.MAX_ROLES, "branch": ref or None, "on_main": ref in ("main", "master"), "preflight": preflight,
                 "protected_paths": protected, "truncated": truncated, "references": references, "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
                 "uncommitted": roles_mod.uncommitted(repo, worktree.git),
@@ -645,10 +647,52 @@ class UIServer(ThreadingHTTPServer):
         roles_mod.save_role(repo, role)
         return self._edited(repo)
 
+    def _role_in_use(self, repo, name):
+        """A role named in the chat's pending or running plan cannot be renamed or deleted
+        until that plan finishes or is cancelled."""
+        chat = self.chat
+        if chat.repo != repo or not chat.plan or chat.state not in ("proposed", "planning", *chat.ACTIVE):
+            return
+        steps = chat.engine.steps if chat.engine else chat.plan[1]
+        if any(s.role == name for s in steps):
+            raise ValueError(f"role {name!r} is used by the plan that is {chat.state}: "
+                             "wait for it to finish or cancel it first")
+
     def delete_role(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
-        roles_mod.delete_role(repo, str(body.get("name", "")))
+        name = str(body.get("name", ""))
+        self._role_in_use(repo, name)
+        roles_mod.delete_role(repo, name)
         return self._edited(repo)
+
+    def rename_role(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        old, new = str(body.get("name", "")), str(body.get("new_name", ""))
+        self._role_in_use(repo, old)
+        roles_mod.rename_role(repo, old, new)
+        return self._edited(repo)
+
+    def role_from_template(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        name = body.get("name")
+        role = roles_mod.role_from_template(self.state_dir, str(body.get("template", "")),
+                                            str(name) if name else None)
+        if (roles_mod.roles_dir(repo) / f"{role.name}.json").exists():
+            raise ValueError(f"a role named {role.name!r} already exists: give it another name")
+        roles_mod.save_role(repo, role)
+        return self._edited(repo)
+
+    # -- personal template library (state dir, outside any repository)
+    def role_templates_view(self):
+        return {"library": [dict(asdict(r), builtin=b) for r, b in roles_mod.library(self.state_dir).values()]}
+
+    def save_role_template(self, body):
+        roles_mod.save_template(self.state_dir, roles_mod.role_from_json(body.get("role")))
+        return self.role_templates_view()
+
+    def delete_role_template(self, body):
+        roles_mod.delete_template(self.state_dir, str(body.get("name", "")))
+        return self.role_templates_view()
 
     def install_templates(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
@@ -791,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.roles_view(repo))
             except ValueError as exc:
                 return self._error(400, str(exc))
+        if path == "/api/role-templates":
+            return self._json(200, srv.role_templates_view())
         if path.startswith("/api/templates/"):
             try:
                 return self._json(200, srv.load_template(path[len("/api/templates/"):]))
@@ -838,6 +884,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.save_role(body))
             if path == "/api/roles/delete":
                 return self._json(200, srv.delete_role(body))
+            if path == "/api/roles/rename":
+                return self._json(200, srv.rename_role(body))
+            if path == "/api/roles/from-template":
+                return self._json(200, srv.role_from_template(body))
+            if path == "/api/role-templates":
+                return self._json(200, srv.save_role_template(body))
+            if path == "/api/role-templates/delete":
+                return self._json(200, srv.delete_role_template(body))
             if path == "/api/roles/templates":
                 return self._json(200, srv.install_templates(body))
             if path == "/api/roles/commit":

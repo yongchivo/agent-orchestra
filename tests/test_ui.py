@@ -416,11 +416,13 @@ def test_get_and_head_never_modify_state(ui, repo):
                     f"/api/start?repo={repo}", f"/api/branch?repo={repo}&name=evil",
                     "/api/chat", f"/api/chat?repo={repo}&message=hi", "/api/pipeline/approve",
                     "/api/pipeline/merge", "/api/pipeline/cancel", "/api/roles/delete",
-                    f"/api/roles/templates?repo={repo}", f"/api/roles/commit?repo={repo}", "/api/project"]
+                    f"/api/roles/templates?repo={repo}", f"/api/roles/commit?repo={repo}", "/api/project",
+                    f"/api/roles/rename?repo={repo}&name=a&new_name=b", f"/api/roles/from-template?repo={repo}&template=developer",
+                    "/api/role-templates/delete?name=developer"]
     read_paths = ["/", "/app.js", "/style.css", "/i18n/es.json", "/i18n/en.json", "/brand/lockup.png",
                   "/brand/favicon.png", "/api/status", "/api/results", "/api/templates",
                   "/api/templates/seed", "/api/templates/missing", "/api/events?from=0",
-                  "/api/pipeline", f"/api/roles?repo={repo}", "/api/roles?repo=/"]
+                  "/api/pipeline", f"/api/roles?repo={repo}", "/api/roles?repo=/", "/api/role-templates"]
     for method in ("GET", "HEAD"):
         for path in action_paths:
             status = call(ui, method, path)[0]
@@ -430,7 +432,7 @@ def test_get_and_head_never_modify_state(ui, repo):
             assert call(ui, method, path)[0] in (200, 400, 404), (method, path)
     assert not (repo / ".uno").exists()
 
-    assert _fingerprint(ui) == before
+    assert _fingerprint(ui) == before and not (ui.state_dir / "role-templates").exists()
     assert ui.run is None and not ui.running()
     assert git(repo, "rev-parse", "HEAD") == head_before
     assert git(repo, "branch", "--list") == branches_before

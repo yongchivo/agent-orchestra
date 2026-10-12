@@ -4,6 +4,7 @@ import asyncio
 import http.client
 import json
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -620,3 +621,102 @@ def test_roles_context_and_fingerprint_come_from_one_snapshot(repo, tmp_path):
     files2 = dict(files, **{"roles/developer.json": files["roles/developer.json"].replace(b"Implements", b"Breaks")})
     assert roles_mod.fingerprint_of(files2) != fp and roles_mod.roles_from(files2)["developer"].description.startswith("Breaks")
     assert not roles_mod.trusted(repo, tmp_path / "state", files2)
+
+
+# --- phase 5: role management from both modes, template library, init prompts --------------
+
+def test_role_rename_duplicate_limit_and_protected_paths(ui, repo):
+    r = lambda name: {"name": name, "description": "d", "instructions": "i", "preset": "edit", "paths": ["**"]}
+    status, view = call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})
+    assert status == 200 and "coder" in [x["name"] for x in view["roles"]] and "developer" not in [x["name"] for x in view["roles"]]
+    assert view["trusted"] is True                                        # done from the UI: confirmed
+    assert not (repo / ".uno" / "roles" / "developer.json").exists() and (repo / ".uno" / "roles" / "coder.json").is_file()
+    for bad in ({"name": "coder", "new_name": "../x"}, {"name": "coder", "new_name": "architect"}, {"name": "nope", "new_name": "x"},
+                {"name": "coder", "new_name": "Bad Name"}):
+        assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), **bad})[0] == 400, bad
+    # Hard cap: 12 roles per project, enforced in the core (UI, init and templates all go through it).
+    for i in range(9):
+        assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": r(f"extra{i}")})[0] == 200
+    status, body = call(ui, "POST", "/api/roles", {"repo": str(repo), "role": r("one-too-many")})
+    assert status == 400 and "at most 12 roles" in body["error"]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "tester"})[0] == 400
+    assert len(roles_mod.load_roles(repo)) == 12
+    # Permissions still come from the presets only, and the global protected list applies to every role.
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), preset="shell")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), paths=[".uno/**"])})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), allowed_tools=["Bash"])})[0] == 400
+
+
+def test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted(ui, repo, monkeypatch):
+    async def slow(self):
+        await asyncio.sleep(1.5)
+    monkeypatch.setattr(Worker, "_run_mock", slow)
+    assert chat(ui, repo, "do the thing")[0] == 200
+    assert wait_state(ui, "proposed") == "proposed"
+    status, body = call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})
+    assert status == 400 and "used by the plan that is proposed" in body["error"]
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "developer"})[0] == 400
+    assert (repo / ".uno" / "roles" / "developer.json").is_file()
+    assert call(ui, "POST", "/api/pipeline/cancel", {})[0] == 200           # plan discarded -> allowed again
+    assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})[0] == 200
+    assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "coder", "new_name": "developer"})[0] == 200
+    assert git(repo, "status", "--porcelain") == ""                        # renamed back: the tree is clean again
+    ui.chat.__init__(ui)
+    assert chat(ui, repo, "do the thing")[0] == 200 and wait_state(ui, "proposed") == "proposed"
+    assert call(ui, "POST", "/api/pipeline/approve", {})[0] == 200
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "developer"})[0] == 400  # running
+    wait_state(ui, "review", "idle")
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "architect"})[0] == 200  # over: allowed
+
+
+def test_personal_template_library(ui, repo, tmp_path):
+    _, lib = call(ui, "GET", "/api/role-templates")
+    names = {x["name"]: x["builtin"] for x in lib["library"]}
+    assert names == {"developer": True, "security-analyst": True, "architect": True, "tester": True}
+    mine = {"name": "docs-writer", "description": "writes docs", "instructions": "Document the change in docs/.",
+            "preset": "edit", "paths": ["docs/**"], "output": "text", "output_format": "", "max_turns": 10}
+    status, lib = call(ui, "POST", "/api/role-templates", {"role": mine})
+    assert status == 200 and {x["name"]: x["builtin"] for x in lib["library"]}["docs-writer"] is False
+    path = ui.state_dir / "role-templates" / "docs-writer.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert not list(repo.rglob("docs-writer*"))                             # the library never touches the repository
+    assert call(ui, "POST", "/api/role-templates", {"role": dict(mine, tools=["Bash"])})[0] == 400
+    assert call(ui, "POST", "/api/role-templates", {"role": dict(mine, name="../evil")})[0] == 400
+    # Add from a template into the project, under its name or another one; the result is confirmed.
+    status, view = call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "docs-writer"})
+    assert status == 200 and "docs-writer" in [r["name"] for r in view["roles"]] and view["trusted"] is True
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "docs-writer"})[0] == 400  # exists
+    status, view = call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "tester", "name": "qa"})
+    assert status == 200 and roles_mod.load_roles(repo)["qa"].paths == ["tests/**", "test/**"]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "nope"})[0] == 400
+    # A tampered personal template is skipped, never loaded.
+    (ui.state_dir / "role-templates" / "evil.json").write_text('{"name": "evil", "description": "", "instructions": "", "preset": "edit", "paths": ["**"], "tools": ["Bash"]}')
+    assert "evil" not in [x["name"] for x in call(ui, "GET", "/api/role-templates")[1]["library"]]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "evil"})[0] == 400
+    assert call(ui, "POST", "/api/role-templates/delete", {"name": "developer"})[0] == 400  # built-ins stay
+    assert call(ui, "POST", "/api/role-templates/delete", {"name": "docs-writer"})[0] == 200 and not path.exists()
+    _, view = call(ui, "GET", f"/api/roles?repo={repo}")
+    assert view["max_roles"] == 12 and [x["name"] for x in view["library"] if not x["builtin"]] == []
+
+
+def test_init_adds_a_new_role_and_one_from_the_library(tmp_path):
+    from uno_orchestra import init
+    state_dir = tmp_path / "state"
+    roles_mod.save_template(state_dir, roles_mod.Role(name="docs-writer", description="docs", instructions="Write docs.",
+                                                      preset="readonly", paths=["docs/**"]))
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    commit(repo, "init")
+    answers = iter(["n", "ops", "Keeps CI green.", "no", "ci/** .github/**",     # new role, read-only
+                    "t", "docs-writer",                                         # from my library
+                    "t", "developer", "dev-2",                                  # built-in whose name is taken -> copy
+                    "d"])
+    def ask(q, d):
+        return next(answers) if ("[n]ew role" in q or q.strip().startswith(("name", "what", "can it", "which folders", "template", "that name"))) else d
+    assert init.run(repo, state_dir, ask=ask, say=lambda *a: None) == 0
+    roles = roles_mod.load_roles(repo)
+    assert roles["ops"].preset == "readonly" and roles["ops"].paths == ["ci/**", ".github/**"] and roles["ops"].instructions == "Keeps CI green."
+    assert roles["docs-writer"].paths == ["docs/**"] and roles["dev-2"].instructions == roles["developer"].instructions
+    assert roles_mod.trusted(repo, state_dir)

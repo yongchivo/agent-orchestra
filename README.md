@@ -222,6 +222,18 @@ outside Uno, no `.uno/`), and a visible notice says when the token is missing or
 the local server is gone. Switching modes only shows or hides panels: it never changes a
 permission or a limit (the server enforces them whatever the page sends).
 
+**Roles** (both modes): the header button opens the role editor. Create a role from scratch,
+by duplicating one or from a template, rename it, edit it, delete it, or save it as a template
+in your personal library (`~/.uno-orchestra/role-templates/`, outside any repository; the four
+built-in roles are always there). Simple mode asks four plain questions (name, what it does,
+can it modify files or only read, which folders); Advanced shows every field. A role used by a
+plan that is proposed or running cannot be renamed or deleted until the plan finishes or is
+cancelled. The rules do not move: names by the same regex, permissions only from the presets,
+validated paths, protected paths for every role, at most 12 roles per project, and what you
+change from the UI is confirmed in the fingerprint while edits made by hand in the repository
+still ask for confirmation. `uno init` offers the same: after the proposals, a [n]ew role or one
+from your [t]emplates.
+
 **Advanced mode** adds everything below: the parallel-run form, templates, the roles and
 project-context editor, the raw event log and the publish helper, plus backend, parallelism
 and correction rounds next to the chat.
@@ -294,6 +306,7 @@ paste; the UI never pushes or runs `gh`.
 | Runaway run | Stop kills process groups and cleans worktrees | `test_stop_cancels_the_run_and_cleans_up` |
 | A brand file that is not an image, too big, or outside the brand directory | fixed routes to fixed names, PNG signature, 1 MiB cap, regular file inside the directory, `image/png` + `nosniff`, 404 otherwise | `test_brand_pngs_are_served_only_from_the_allowlist`, `test_svg_or_oversized_brand_file_is_refused`, `test_without_a_brand_directory_the_ui_is_neutral` |
 | HTML in a translation, or the mode loosening a rule | dictionaries rendered with `textContent`; the mode is a CSS class, the server validates the same fields and limits | `test_i18n_dictionaries_are_static_and_rendered_as_text`, `test_simple_mode_is_a_css_class_and_changes_no_permission_or_limit` |
+| A role renamed or deleted under a running plan, too many roles, a tampered personal template | the server refuses while a plan using the role is proposed or running; 12 roles per project in the core; templates pass the same strict schema, invalid ones are skipped; built-ins cannot be deleted | `test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted`, `test_role_rename_duplicate_limit_and_protected_paths`, `test_personal_template_library` (`tests/test_pipeline.py`) |
 | Token persisted by the page, or a weaker CSP | `localStorage` holds language, mode and project only; the CSP is asserted byte for byte | `test_localstorage_never_holds_the_token`, `test_csp_is_unchanged_or_stricter` |
 
 **Manual verification against a live server**

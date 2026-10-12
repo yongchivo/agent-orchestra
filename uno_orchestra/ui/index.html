@@ -34,6 +34,7 @@
   </label>
   <input id="repo" data-adv list="recent" data-i18n-placeholder="repo.placeholder" autocomplete="off" spellcheck="false">
   <datalist id="recent"></datalist>
+  <button id="rolesOpen" type="button" class="ghost" data-i18n="roles.button" disabled>Roles</button>
   <div class="switches">
     <div class="seg" id="langSeg" role="group" aria-label="language">
       <button type="button" data-lang="es">ES</button><button type="button" data-lang="en">EN</button>
@@ -150,32 +151,13 @@
       <h2><span data-i18n="adv.roles">Roles y proyecto</span> <span id="rolesState" class="hint"></span></h2>
       <p class="hint" data-i18n="adv.roles.hint"></p>
       <div class="row">
-        <label><span data-i18n="adv.role">rol</span> <select id="roleList"></select></label>
-        <button id="roleNew" type="button" class="ghost" data-i18n="adv.roleNew">+ nuevo rol</button>
-        <button id="roleTemplates" type="button" class="ghost" data-i18n="adv.roleTemplates">Instalar plantillas</button>
+        <button id="rolesOpen2" type="button" class="ghost" data-i18n="roles.manage">Gestionar roles</button>
         <button id="orchestraCommit" type="button" class="ghost" hidden data-i18n="adv.commit">Commit de .uno/</button>
       </div>
-      <ul id="rolesErrors" class="errors"></ul>
       <div id="rolesTrust" class="trust" hidden>
         <p class="reminder" data-i18n="adv.trust"></p>
         <ul id="rolesPreview" class="warnings"></ul>
         <button id="roleTrust" type="button" class="primary" data-i18n="adv.trust.button">Los he revisado: confirmar roles</button>
-      </div>
-      <div class="task" id="roleForm">
-        <div class="row">
-          <label><span data-i18n="adv.r.name">nombre</span> <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>
-          <label>preset <select id="r-preset"><option value="edit">edit</option><option value="readonly">readonly</option></select></label>
-          <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
-          <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
-        </div>
-        <label><span data-i18n="adv.r.desc">descripción</span> <input id="r-desc" autocomplete="off"></label>
-        <label><span data-i18n="adv.r.instr">instrucciones</span> <textarea id="r-instr" rows="4"></textarea></label>
-        <label><span data-i18n="adv.r.format">formato de salida esperado</span> <textarea id="r-format" rows="2"></textarea></label>
-        <label><span data-i18n="adv.r.paths">rutas por defecto</span> <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
-        <div class="row actions">
-          <button id="roleSave" type="button" class="primary" data-i18n="adv.roleSave">Guardar rol</button>
-          <button id="roleDelete" type="button" class="ghost" data-i18n="adv.roleDelete">Eliminar</button>
-        </div>
       </div>
       <label><span data-i18n="adv.project">contexto del proyecto</span> <textarea id="projectCtx" rows="3" data-i18n-placeholder="adv.project.placeholder"></textarea></label>
       <div class="row actions"><button id="projectSave" type="button" class="ghost" data-i18n="adv.projectSave">Guardar contexto</button></div>
@@ -203,6 +185,49 @@
     </section>
   </section>
 </main>
+
+<dialog id="rolesDialog">
+  <form method="dialog">
+    <h2><span data-i18n="roles.title">Roles</span> <span id="rolesCount" class="hint"></span> <button type="submit" class="ghost small close" data-i18n="roles.close">Cerrar</button></h2>
+    <p class="hint" data-i18n="roles.hint"></p>
+    <div class="row">
+      <label><span data-i18n="adv.role">rol</span> <select id="roleList"></select></label>
+      <button id="roleNew" type="button" class="ghost" data-i18n="roles.new">+ nuevo</button>
+      <button id="roleDup" type="button" class="ghost" data-i18n="roles.duplicate">Duplicar</button>
+      <label><span data-i18n="roles.library">plantilla</span> <select id="libList"></select></label>
+      <button id="roleFromTpl" type="button" class="ghost" data-i18n="roles.fromTemplate">Añadir desde plantilla</button>
+    </div>
+    <ul id="rolesErrors" class="errors"></ul>
+    <div class="task" id="roleForm">
+      <label><span data-i18n="roles.name">nombre</span> <input id="r-name" placeholder="developer" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="roles.what">qué hace</span> <textarea id="r-instr" rows="5"></textarea></label>
+      <div class="row">
+        <label><span data-i18n="roles.access">permisos</span>
+          <select id="r-preset"><option value="edit" data-i18n="roles.canEdit">puede modificar archivos</option><option value="readonly" data-i18n="roles.readonly">solo lee</option></select>
+        </label>
+        <label class="grow"><span data-i18n="roles.folders">en qué carpetas trabaja</span> <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div data-adv>
+        <label><span data-i18n="adv.r.desc">descripción</span> <input id="r-desc" autocomplete="off"></label>
+        <div class="row">
+          <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
+          <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
+        </div>
+        <label><span data-i18n="adv.r.format">formato de salida esperado</span> <textarea id="r-format" rows="2"></textarea></label>
+      </div>
+      <div class="row actions">
+        <button id="roleSave" type="button" class="primary" data-i18n="adv.roleSave">Guardar rol</button>
+        <button id="roleDelete" type="button" class="ghost" data-i18n="adv.roleDelete">Eliminar</button>
+        <button id="roleTplSave" type="button" class="ghost" data-i18n="roles.saveTemplate">Guardar como plantilla</button>
+      </div>
+      <div class="row">
+        <input id="r-newname" data-i18n-placeholder="roles.newName" autocomplete="off" spellcheck="false">
+        <button id="roleRename" type="button" class="ghost" data-i18n="roles.rename">Renombrar</button>
+        <button id="tplDelete" type="button" class="ghost" data-adv data-i18n="roles.deleteTemplate">Eliminar plantilla personal</button>
+      </div>
+    </div>
+  </form>
+</dialog>
 
 <template id="taskRow">
   <div class="task">

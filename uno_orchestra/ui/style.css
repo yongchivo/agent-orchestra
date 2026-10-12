@@ -195,3 +195,13 @@ ul.warnings li { color: var(--warn); }
 .result .detail { color: var(--dim); margin: 4px 0; font-size: 13px; }
 pre { background: rgba(0, 0, 0, .35); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto; font-family: var(--mono); font-size: 12px; white-space: pre; max-height: 40vh; margin: 6px 0; }
 pre.diff .add { color: var(--ok); } pre.diff .del { color: var(--bad); } pre.diff .meta { color: var(--dim); }
+
+/* --- roles dialog ------------------------------------------------------------------------ */
+dialog { background: var(--panel-solid); color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; width: min(760px, 92vw); max-height: 90vh; overflow: auto; box-shadow: 0 0 40px rgba(154, 92, 242, .25); }
+dialog::backdrop { background: rgba(14, 15, 26, .72); backdrop-filter: blur(3px); }
+dialog h2 { display: flex; align-items: center; gap: 10px; font-size: 11px; font-weight: 700; letter-spacing: .3em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
+dialog h2::before { content: ""; width: 18px; height: 3px; border-radius: 2px; background: var(--grad); box-shadow: var(--glow); }
+dialog h2 .close { margin-left: auto; letter-spacing: 0; text-transform: none; }
+dialog h2 .hint { letter-spacing: 0; text-transform: none; font-weight: 400; }
+dialog label { width: 100%; } dialog .row label { width: auto; }
+#rolesOpen { padding: 5px 12px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
