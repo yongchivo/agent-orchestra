@@ -268,5 +268,13 @@
   "roles.state.count": "{n} roles",
   "roles.state.uncommitted": "sin commit: {files}",
   "roles.state.truncated": "contexto recortado: {n} caracteres de {doc} omitidos (los agentes pueden leer el archivo)",
-  "review.findings.count": "{n} hallazgos"
+  "review.findings.count": "{n} hallazgos",
+  "ps.target": "destino",
+  "ps.target.claude-code": "Claude Code",
+  "ps.target.uno": "Orquestador de Uno",
+  "ps.target.hint.claude-code": "un agente en sesión: commits pequeños en la rama de trabajo; push y PR solo con tu confirmación",
+  "ps.target.hint.uno": "el planner reparte las tareas entre los roles; sin ramas, commits ni PR (los gestiona el orquestador)",
+  "ps.send.notUno": "Este prompt se generó para Claude Code: genera uno con destino «Orquestador de Uno» antes de enviarlo.",
+  "ps.send.regenerate": "Este prompt se generó para Claude Code (ramas, commits, PR). ¿Regenerarlo con destino «Orquestador de Uno» con las mismas entradas? No se enviará tal cual.",
+  "lint.git_instructions": "destino Uno: instrucción de rama, commit, push o PR (los agentes de Uno no las ejecutan)"
 }

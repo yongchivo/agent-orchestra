@@ -776,7 +776,7 @@ class UIServer(ThreadingHTTPServer):
     # -- Prompt Studio (prompts.py): no tools, redacted inputs, library in the state directory
     def studio_view(self):
         default = models.default_for("prompt-studio")
-        return {"modes": list(prompts.MODES), "details": list(prompts.DETAILS), "langs": list(prompts.LANGS),
+        return {"modes": list(prompts.MODES), "details": list(prompts.DETAILS), "langs": list(prompts.LANGS), "targets": list(prompts.TARGETS),
                 "templates": [{k: t[k] for k in ("name", "mode", "instructions", "builtin", "version", "versions")}
                               for t in prompts.templates(self.state_dir).values()],
                 "default": {"model": default[0], "effort": default[1]},
@@ -838,7 +838,7 @@ class UIServer(ThreadingHTTPServer):
             data = prompts.generate(inp, s["template"], backend=s["backend"], model=s["model"], effort=s["effort"],
                                     project=s["project"], cwd=str(self.state_dir), auth=config.auth_mode(self.state_dir))
             text = prompts.render(data, inp["lang"])
-            out = {"text": text, "lint": prompts.lint(text), "title": data["title"],
+            out = {"text": text, "lint": prompts.lint(text, inp["target"]), "title": data["title"], "target": inp["target"],
                    "assumptions": data["assumptions"], "open_questions": data["open_questions"],
                    "suggested_roles": data["suggested_roles"],
                    "missing_roles": [r for r in data["suggested_roles"] if r not in s["roles"]] if s["roles"] else [],
@@ -846,7 +846,7 @@ class UIServer(ThreadingHTTPServer):
                    "override_only": models.is_override_only(s["model"]), "template": s["template"]["name"]}
             if inp["mode"] in ("review", "edit"):
                 out["diff"] = prompts.diff(inp["prompt"], text, "yours", "new")
-                out["lint_input"] = prompts.lint(inp["prompt"])
+                out["lint_input"] = prompts.lint(inp["prompt"], inp["target"])
             if inp["mode"] == "review":
                 out["review"] = data["review"]
             return out
@@ -856,7 +856,7 @@ class UIServer(ThreadingHTTPServer):
         text = body.get("text")
         if not isinstance(text, str) or len(text) > prompts.MAX_PROMPT_OUT:
             raise ValueError(f"text must be a string of at most {prompts.MAX_PROMPT_OUT} characters")
-        return prompts.lint(text)
+        return prompts.lint(text, body.get("target"))
 
     def studio_library(self, query):
         """?q=&tag=&mode= searches (latest versions, without the text); ?name=[&version=] loads one."""
@@ -908,11 +908,17 @@ class UIServer(ThreadingHTTPServer):
         """Hand a prompt to the orchestrator: it plans, and the plan waits for the user's approval
         in the review panel, exactly like a chat message. Never runs anything by itself, and
         refuses a prompt in which the linter still finds a secret."""
-        text = body.get("text")
+        text, target = body.get("text"), body.get("target")
         if "name" in body:
-            text = prompts.library(self.state_dir).load(str(body["name"]), body.get("version"))["text"]
+            entry = prompts.library(self.state_dir).load(str(body["name"]), body.get("version"))
+            text, target = entry["text"], entry["target"]
         if not isinstance(text, str) or not text.strip() or len(text) > prompts.MAX_PROMPT_OUT:
             raise ValueError(f"text must be a non-empty string of at most {prompts.MAX_PROMPT_OUT} characters")
+        if target != "uno":
+            # Generated for Claude Code (branch, commits, push, PR): not what Uno's agents can follow.
+            # The page offers to regenerate it for Uno instead of sending it as it is.
+            return 409, {"error": "this prompt was not generated for Uno's orchestrator: regenerate it with target 'uno'",
+                         "code": "target_not_uno"}
         if prompts.has_secret(text):
             raise ValueError("the prompt contains what looks like a secret: remove it before sending it")
         chat_body = {k: body[k] for k in ("repo", "backend", "parallel", "max_iterations", "overrides", "planner") if k in body}

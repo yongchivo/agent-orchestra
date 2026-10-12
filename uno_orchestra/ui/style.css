@@ -255,3 +255,5 @@ details summary { cursor: pointer; color: var(--dim); font-size: 12px; letter-sp
 .librow .idea { margin: 3px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .librow .row { margin: 4px 0 0; }
 .tag { font-size: 11px; color: var(--sky); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
+.target { margin: 0 0 8px; align-items: center; }
+#psTarget button[aria-pressed="true"] { background: var(--grad); color: var(--bg); }

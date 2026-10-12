@@ -25,6 +25,10 @@ from .bus import SECRET_RE, redact
 from .worker import NAME_RE
 
 MODES = ("create", "fix", "improve", "audit", "review", "edit")
+# Who will run the prompt. Claude Code: one agent in a session, small commits on the working branch,
+# push and PR only with the user's confirmation. Uno: the orchestrator's planner splits it between
+# role agents that never commit, push or open PRs (the orchestrator manages branches and merges).
+TARGETS = ("claude-code", "uno")
 DETAILS = ("brief", "standard", "exhaustive")
 LANGS = ("es", "en")
 MAX_IDEA = 2000
@@ -125,7 +129,10 @@ def check_inputs(body):
     lang = body.get("lang", "es")
     if lang not in LANGS:
         raise PromptError(f"lang must be one of {list(LANGS)}")
-    out = {"mode": mode, "detail": detail, "lang": lang,
+    target = body.get("target", "claude-code")
+    if target not in TARGETS:
+        raise PromptError(f"target must be one of {list(TARGETS)}")
+    out = {"mode": mode, "detail": detail, "lang": lang, "target": target,
            "idea": _text(body, "idea", MAX_IDEA, required=True),
            "prompt": _text(body, "prompt", MAX_PROMPT_IN, required=mode in ("review", "edit")),
            "changes": _text(body, "changes", MAX_CHANGES, required=mode == "edit")}
@@ -254,11 +261,16 @@ VERIFIABLE = ("test", "pasa", "pass", "fall", "fail", "devuelve", "return", "exi
               "muestra", "show", "exist", "contien", "contain", "igual", "equal", "comando", "command", "lint", "compil",
               "build", "verde", "green", "ci ", "%", "ms", "≤", "<=", ">=", "http", "200", "404", "log", "diff", "commit",
               "archivo", "file", "ruta", "path", "salida", "output", "respuesta", "response", "línea", "line", "pytest", "npm")
+# Instructions about branches, commits, pushes or pull requests: fine for Claude Code, wrong for
+# Uno's agents (they never commit; the orchestrator creates the branches and merges on approval).
+GIT_RE = re.compile(r"\bgit (commit|push|checkout|branch|merge|add|rebase)\b|\bpull requests?\b|\bPRs?\b|\bcommits?\b"
+                    r"|\bpush(es|ed|ear|ing)?\b|\b(crea|crear|creas|abre|abrir|cambia a|trabaja en) (una |la )?rama\b"
+                    r"|\b(create|open|work on|switch to) (a |the )?(new |working |feature )?branch\b|\bfeature/[a-z0-9-]+", re.I)
 PENALTY = {"missing_section": 10, "duplicate_section": 10, "empty_section": 5, "no_out_of_scope": 5,
            "tasks_not_numbered": 5, "vague_criterion": 5, "no_tests": 10, "no_stop": 10,
-           "placeholder": 5, "too_long": 10, "secret": 30}
+           "placeholder": 5, "too_long": 10, "secret": 30, "git_instructions": 10}
 SEVERITY = {"secret": "high", "missing_section": "medium", "duplicate_section": "medium", "no_tests": "medium",
-            "no_stop": "medium", "vague_criterion": "medium", "placeholder": "medium"}
+            "no_stop": "medium", "vague_criterion": "medium", "placeholder": "medium", "git_instructions": "medium"}
 
 
 def _sections(text):
@@ -275,13 +287,16 @@ def _sections(text):
     return {k: ["\n".join(b).strip() for b in bodies] for k, bodies in found.items()}
 
 
-def lint(text, lang=None):
-    """Score 0..100 and the reasons. Pure function over the text: the same prompt always gets the
-    same score, whoever wrote it. Codes: missing_section, duplicate_section, empty_section,
-    no_out_of_scope, tasks_not_numbered, vague_criterion, no_tests, no_stop, placeholder,
-    too_long, secret. The UI translates the codes; `detail` names the section or the line."""
+def lint(text, target=None):
+    """Score 0..100 and the reasons. Pure function over the text (and the target): the same prompt
+    always gets the same score, whoever wrote it. Codes: missing_section, duplicate_section,
+    empty_section, no_out_of_scope, tasks_not_numbered, vague_criterion, no_tests, no_stop,
+    placeholder, too_long, secret, and git_instructions when the target is Uno. The UI translates
+    the codes; `detail` names the section or the line."""
     if not isinstance(text, str):
         raise PromptError("text must be a string")
+    if target is not None and target not in TARGETS:
+        raise PromptError(f"target must be one of {list(TARGETS)}")
     warnings = []
     warn = lambda code, detail="": warnings.append({"code": code, "severity": SEVERITY.get(code, "low"),
                                                      "detail": str(detail)[:120]})
@@ -315,6 +330,10 @@ def lint(text, lang=None):
         warn("too_long", f"{len(text)} > {LINT_MAX_LEN}")
     for m in list(SECRET_RE.finditer(text))[:5]:
         warn("secret", m.group(0)[:12] + "…")
+    if target == "uno":
+        lines = [ln.strip() for ln in text.split("\n") if GIT_RE.search(ln)]
+        for line in list(dict.fromkeys(lines))[:5]:   # one warning per offending line
+            warn("git_instructions", line)
     score = max(0, 100 - sum(PENALTY[w["code"]] for w in warnings))
     return {"score": score, "warnings": warnings, "sections": [k for k in SECTIONS if k in secs], "length": len(text)}
 
@@ -463,7 +482,7 @@ def templates(state_dir):
 
 # --- library entries ---------------------------------------------------------------------------
 
-ENTRY_FIELDS = {"name", "text", "mode", "lang", "tags", "idea", "score", "model", "effort", "created"}
+ENTRY_FIELDS = {"name", "text", "mode", "lang", "target", "tags", "idea", "score", "model", "effort", "created"}
 
 
 def check_entry(data):
@@ -483,12 +502,13 @@ def check_entry(data):
         raise PromptError(f"tags must be at most {MAX_TAGS} names of a-z, 0-9 and '-'")
     mode = data.get("mode", "create")
     lang = data.get("lang", "es")
-    if mode not in MODES or lang not in LANGS:
-        raise PromptError("mode or lang out of range")
+    target = data.get("target", "claude-code")
+    if mode not in MODES or lang not in LANGS or target not in TARGETS:
+        raise PromptError("mode, lang or target out of range")
     score = data.get("score", 0)
     if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 100:
         raise PromptError("score must be an integer 0..100")
-    out = {"name": name, "text": text, "mode": mode, "lang": lang, "tags": list(dict.fromkeys(tags)),
+    out = {"name": name, "text": text, "mode": mode, "lang": lang, "target": target, "tags": list(dict.fromkeys(tags)),
            "idea": _text(data, "idea", MAX_IDEA), "score": score,
            # Informational only (which model wrote it): never read back as a setting.
            "model": _text(data, "model", 40), "effort": _text(data, "effort", 20),
@@ -518,7 +538,7 @@ def search(state_dir, q="", tag="", mode=""):
         hay = " ".join([e["name"], " ".join(e["tags"]), e["idea"], e["text"]]).lower()
         if q and q not in hay:
             continue
-        out.append({k: e[k] for k in ("name", "version", "versions", "mode", "lang", "tags", "score", "created", "model")}
+        out.append({k: e[k] for k in ("name", "version", "versions", "mode", "lang", "target", "tags", "score", "created", "model")}
                    | {"idea": e["idea"][:160]})
         if len(out) >= MAX_RESULTS:
             break
@@ -547,6 +567,27 @@ DETAIL_TEXT = {
     "exhaustive": "exhaustive: every section developed, tasks broken down file by file where known, edge cases named",
 }
 LANG_TEXT = {"es": "Spanish", "en": "English"}
+TARGET_TEXT = {"claude-code": "Claude Code (one agent in an interactive session)",
+               "uno": "Uno's orchestrator (a planner splits the prompt between role agents)"}
+TARGET_RULES = {
+    "claude-code": (
+        "- Target Claude Code, git policy (the same in every mode): the agent works on a working branch; "
+        "small commits on that branch are allowed; push and opening a pull request only after the user's "
+        "explicit confirmation. Say so once in STOP POINTS and once in CLOSING; nowhere else."),
+    "uno": (
+        "- Target Uno's orchestrator: a planner will split this prompt into steps for role agents that NEVER "
+        "commit, push, create branches or open pull requests (the orchestrator creates the branches and merges "
+        "only after the user's approval). Therefore do not mention branches, commits, pushes, pull requests "
+        "or CI anywhere, not even to say that they are not done, and ignore that part of the template "
+        "guidance below. Write each "
+        "task as one responsibility that a single role can own (what to change or verify, and in which files "
+        "or folders), so the planner can hand it to the right role: implementation tasks, test tasks and "
+        "review tasks apart. SCOPE lists the paths of the roles the work needs, taken from the project data "
+        "when a project is given. STOP POINTS are where the orchestrator must ask the user (the plan itself is "
+        "approved by the user before it runs): a change outside the roles' paths, a dependency, a schema or "
+        "rules change, a destructive action; never 'before the push' or 'before the commit', which do not "
+        "exist here. CLOSING says what the user will review: the consolidated diff and the reviewers' findings."),
+}
 
 
 def project_summary(repo, roles, context):
@@ -569,7 +610,7 @@ def wrap_untrusted(text):
 
 
 def _request_text(inp, project=None):
-    lines = [f"Mode: {inp['mode']} ({MODE_TEXT[inp['mode']]}).", f"Request: {inp['idea']}"]
+    lines = [f"Mode: {inp['mode']} ({MODE_TEXT[inp['mode']]}). Target: {TARGET_TEXT[inp['target']]}.", f"Request: {inp['idea']}"]
     for key, label in (("kind", "Type"), ("goal", "Goal"), ("stack", "Stack"), ("avoid", "Do not touch")):
         if inp[key]:
             lines.append(f"{label}: {inp[key]}")
@@ -597,7 +638,7 @@ def clarify_system():
             'Reply with JSON only: {"questions": [{"question": "...", "why": "..."}]}.')
 
 
-def generator_system(mode, template, lang):
+def generator_system(mode, template, lang, target="claude-code"):
     return "\n".join([
         "You write prompts for AI coding agents. You hold no tool and run nothing: you only fill the fields "
         "of a JSON schema; the program renders the final prompt with a fixed structure (objective, context, "
@@ -619,6 +660,7 @@ def generator_system(mode, template, lang):
         "- 'suggested_roles': lowercase names (a-z, 0-9, '-') of the kinds of agents the prompt needs, such "
         "as developer, tester, security-analyst, architect; at most 6; the program checks them against the "
         "project and never creates them.",
+        TARGET_RULES[target],
         f"- Write every text in {LANG_TEXT[lang]}. Keep the user's own words where they were precise.",
         f"- Sizes: 'title' is one line of at most {MAX_TITLE} characters; each list has at most {MAX_ITEMS} items of at "
         f"most {MAX_ITEM} characters; 'objective', 'context' and 'closing' at most {MAX_TEXT} characters each.",
@@ -645,8 +687,9 @@ def mock_answer(kind, inp):
            "security": ["Do not weaken any validation, permission or secret handling."],
            "tests": ["A test that fails before the change and passes after it."],
            "acceptance": ["The new test passes.", "The existing test suite passes."],
-           "stops": ["Ask before any push.", "Ask before adding a dependency."],
-           "closing": "Summarise what changed, file by file.",
+           "stops": ["Ask before adding a dependency."] + (["Ask before any push or pull request."] if inp["target"] == "claude-code" else ["Ask if the change needs files outside the roles' paths."]),
+           "closing": ("Small commits on the working branch; push and open the pull request only after my confirmation."
+                       if inp["target"] == "claude-code" else "I will review the consolidated diff and the reviewers' findings."),
            "assumptions": ["Mock assumption: the existing test framework is kept."] if not inp["stack"] else [],
            "open_questions": [a["question"] for a in inp["answers"] if not a["answer"]],
            "suggested_roles": ["developer", "tester", "docs-writer"]}
@@ -677,6 +720,6 @@ def clarify(inp, *, backend, model, effort, project=None, cwd=None, auth="accoun
 
 def generate(inp, template, *, backend, model, effort, project=None, cwd=None, auth="account"):
     """The structured output, validated; the caller renders, lints and diffs."""
-    raw = ask("generate", generator_system(inp["mode"], template, inp["lang"]), _request_text(inp, project),
+    raw = ask("generate", generator_system(inp["mode"], template, inp["lang"], inp["target"]), _request_text(inp, project),
               schema_for(inp["mode"]), backend=backend, model=model, effort=effort, cwd=cwd, auth=auth, inputs=inp)
     return check_output(raw, inp["mode"])

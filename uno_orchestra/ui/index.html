@@ -203,6 +203,13 @@
     <h2><span data-i18n="ps.title">Prompt Studio</span> <span id="psState" class="hint"></span></h2>
     <p class="hint" data-i18n="ps.hint"></p>
     <div class="chips modes" id="psModes" role="group"></div>
+    <div class="row knobs target">
+      <span class="hint" data-i18n="ps.target">destino</span>
+      <div class="seg" id="psTarget" role="group" aria-label="target">
+        <button type="button" data-target="claude-code" data-i18n="ps.target.claude-code">Claude Code</button><button type="button" data-target="uno" data-i18n="ps.target.uno">Orquestador de Uno</button>
+      </div>
+      <span id="psTargetHint" class="hint"></span>
+    </div>
     <textarea id="ps-idea" rows="3" data-i18n-placeholder="ps.idea" maxlength="2000"></textarea>
     <div id="psUserPrompt" hidden>
       <label><span data-i18n="ps.prompt">tu prompt</span> <textarea id="ps-prompt" rows="8" maxlength="12000"></textarea></label>

@@ -99,8 +99,9 @@ def good_output(mode="create"):
     return prompts.mock_answer("generate", prompts.check_inputs({"idea": "x", "mode": mode, "prompt": "p", "changes": "c"}))
 
 
-def perfect(lang="es"):
-    return prompts.render(prompts.check_output(good_output(), "create"), lang)
+def perfect(lang="es", target="uno"):
+    inp = prompts.check_inputs({"idea": "x", "target": target})
+    return prompts.render(prompts.check_output(prompts.mock_answer("generate", inp), "create"), lang)
 
 
 # --- schemas -----------------------------------------------------------------------------------
@@ -220,6 +221,44 @@ def test_generator_runs_with_no_tools_and_its_own_schema(monkeypatch):
     assert json.loads(pc[pc.index("--json-schema") + 1]) == pipeline.PLAN_SCHEMA and "--tools" in pc
 
 
+def test_targets_shape_the_system_prompt_and_the_output(ui, repo, monkeypatch):
+    seen = spy(monkeypatch)
+    with pytest.raises(prompts.PromptError, match="target"):
+        prompts.check_inputs({"idea": "x", "target": "cursor"})
+    assert prompts.check_inputs({"idea": "x"})["target"] == "claude-code"
+    _, view, _ = call(ui, "GET", "/api/prompts")
+    assert view["targets"] == ["claude-code", "uno"]
+    _, cc, _ = call(ui, "POST", "/api/prompts/generate", {"idea": "x", "repo": str(repo), "target": "claude-code"})
+    _, uno, _ = call(ui, "POST", "/api/prompts/generate", {"idea": "x", "repo": str(repo), "target": "uno"})
+    sys_cc, sys_uno = seen[0]["system"], seen[1]["system"]
+    assert "small commits on that branch are allowed" in sys_cc and "only after the user's explicit confirmation" in sys_cc
+    assert "NEVER commit, push, create branches or open pull requests" in sys_uno and "ignore that part of the template" in sys_uno
+    assert "one responsibility that a single role can own" in sys_uno and "paths of the roles" in sys_uno
+    assert "Target: Uno's orchestrator" in seen[1]["prompt"] and "Target: Claude Code" in seen[0]["prompt"]
+    assert cc["target"] == "claude-code" and uno["target"] == "uno"
+    # The same git policy is stated whatever the mode, for Claude Code.
+    for mode in ("fix", "audit", "review"):
+        call(ui, "POST", "/api/prompts/generate", {"idea": "x", "mode": mode, "prompt": "p", "target": "claude-code"})
+        assert "small commits on that branch are allowed" in seen[-1]["system"]
+    # Lint: git instructions are only a problem for Uno; the mock closing for Claude Code names them.
+    assert cc["lint"]["score"] == 100 and uno["lint"]["score"] == 100
+    assert [w["code"] for w in prompts.lint(cc["text"], "uno")["warnings"]] == ["git_instructions"] * 2
+    assert prompts.lint(uno["text"], "uno")["warnings"] == [] and prompts.lint(uno["text"], "claude-code")["warnings"] == []
+    for line in ("Haz commit en la rama de trabajo", "Crea la rama feature/x", "git push origin", "Open a pull request", "Abre un PR al final",
+                 "create a new branch", "commits pequeños", "Trabaja en una rama nueva"):
+        assert [w["code"] for w in prompts.lint("OBJETIVO\n" + line, "uno")["warnings"] if w["code"] == "git_instructions"] == ["git_instructions"], line
+        assert not [w for w in prompts.lint("OBJETIVO\n" + line, "claude-code")["warnings"] if w["code"] == "git_instructions"], line
+        assert not [w for w in prompts.lint("OBJETIVO\n" + line)["warnings"] if w["code"] == "git_instructions"], line
+    assert not [w for w in prompts.lint("OBJETIVO\nNada llega a tu rama hasta que fusiones.", "uno")["warnings"] if w["code"] == "git_instructions"]
+    with pytest.raises(prompts.PromptError):
+        prompts.lint("x", "cursor")
+    assert call(ui, "POST", "/api/prompts/lint", {"text": "OBJETIVO\ngit push", "target": "uno"})[1]["warnings"][-1]["code"] == "git_instructions"
+    assert call(ui, "POST", "/api/prompts/lint", {"text": "x", "target": "cursor"})[0] == 400
+    for lang in ("es", "en"):
+        d = json.loads((ROOT / "uno_orchestra" / "ui" / "i18n" / f"{lang}.json").read_text())
+        assert {"lint.git_instructions", "ps.target.uno", "ps.target.claude-code", "ps.send.regenerate"} <= set(d)
+
+
 # --- linter ------------------------------------------------------------------------------------
 
 def test_linter_detects_each_problem():
@@ -272,7 +311,7 @@ def test_send_to_orchestrator_opens_a_plan_and_never_runs(ui, repo):
     roles_mod.trust(repo, ui.state_dir)
     head = git(repo, "rev-parse", "HEAD")
     text = perfect()
-    status, body, _ = call(ui, "POST", "/api/prompts/send", {"text": text, "repo": str(repo), "backend": "mock"})
+    status, body, _ = call(ui, "POST", "/api/prompts/send", {"text": text, "target": "uno", "repo": str(repo), "backend": "mock"})
     assert status == 200 and body["state"] in ("planning", "proposed")   # the mock planner may already be done
     assert wait_state(ui, "proposed", "idle") == "proposed"
     assert not ui.running() and ui.run is None and ui.chat.engine is None            # proposed, not started
@@ -285,20 +324,40 @@ def test_send_to_orchestrator_opens_a_plan_and_never_runs(ui, repo):
     long_text = perfect() + "\n" + "x" * MAX_CHAT
     assert len(long_text) > MAX_CHAT
     assert call(ui, "POST", "/api/chat", {"message": long_text, "repo": str(repo), "backend": "mock"})[0] == 400
-    assert call(ui, "POST", "/api/prompts/send", {"text": "y" * (prompts.MAX_PROMPT_OUT + 1), "repo": str(repo), "backend": "mock"})[0] == 400
+    assert call(ui, "POST", "/api/prompts/send", {"text": "y" * (prompts.MAX_PROMPT_OUT + 1), "target": "uno", "repo": str(repo), "backend": "mock"})[0] == 400
     # A prompt in which the linter still sees a secret is refused, whoever wrote it.
-    status, body, _ = call(ui, "POST", "/api/prompts/send", {"text": f"{text}\nkey {SECRET}", "repo": str(repo), "backend": "mock"})
+    status, body, _ = call(ui, "POST", "/api/prompts/send", {"text": f"{text}\nkey {SECRET}", "target": "uno", "repo": str(repo), "backend": "mock"})
     assert status == 400 and "secret" in body["error"]
     # The same rules as the chat: no roles confirmed, no plan.
     assert call(ui, "POST", "/api/pipeline/cancel", {})[0] == 200
     (repo / ".uno" / "project.json").write_text(json.dumps({"context": "changed outside Uno"}))
-    assert call(ui, "POST", "/api/prompts/send", {"text": text, "repo": str(repo), "backend": "mock"})[0] == 400
+    assert call(ui, "POST", "/api/prompts/send", {"text": text, "target": "uno", "repo": str(repo), "backend": "mock"})[0] == 400
+
+
+def test_send_requires_a_prompt_generated_for_uno(ui, repo, monkeypatch):
+    roles_mod.trust(repo, ui.state_dir)
+    spy(monkeypatch)
+    _, cc, _ = call(ui, "POST", "/api/prompts/generate", {"idea": "x", "target": "claude-code", "backend": "mock"})
+    assert cc["target"] == "claude-code"
+    for body in ({"text": cc["text"]}, {"text": cc["text"], "target": "claude-code"}, {"text": cc["text"], "target": "uno "}):
+        status, r, _ = call(ui, "POST", "/api/prompts/send", {**body, "repo": str(repo), "backend": "mock"})
+        assert status == 409 and r["code"] == "target_not_uno", body
+    assert ui.chat.state == "idle"
+    assert call(ui, "POST", "/api/prompts/library", {"name": "cc", "text": cc["text"], "target": "claude-code"})[0] == 200
+    status, r, _ = call(ui, "POST", "/api/prompts/send", {"name": "cc", "repo": str(repo), "backend": "mock"})
+    assert status == 409 and r["code"] == "target_not_uno"      # the library entry's own target decides, not the request
+    assert call(ui, "POST", "/api/prompts/library", {"name": "u", "text": perfect(), "target": "uno"})[0] == 200
+    assert call(ui, "POST", "/api/prompts/send", {"name": "u", "repo": str(repo), "backend": "mock"})[0] == 200
+    assert wait_state(ui, "proposed", "idle") == "proposed"
+    assert call(ui, "POST", "/api/prompts/library", {"name": "bad", "text": "t", "target": "cursor"})[0] == 400
+    js = (ROOT / "uno_orchestra" / "ui" / "app.js").read_text()
+    assert "t('ps.send.regenerate')" in js and "target: 'uno'" in js      # the page offers to regenerate, never sends as it is
 
 
 def test_send_from_the_library_by_name_and_version(ui, repo):
     roles_mod.trust(repo, ui.state_dir)
-    assert call(ui, "POST", "/api/prompts/library", {"name": "p", "text": perfect(), "mode": "fix"})[0] == 200
-    assert call(ui, "POST", "/api/prompts/library", {"name": "p", "text": perfect() + "\nv2", "mode": "fix"})[0] == 200
+    assert call(ui, "POST", "/api/prompts/library", {"name": "p", "text": perfect(), "mode": "fix", "target": "uno"})[0] == 200
+    assert call(ui, "POST", "/api/prompts/library", {"name": "p", "text": perfect() + "\nv2", "mode": "fix", "target": "uno"})[0] == 200
     status, body, _ = call(ui, "POST", "/api/prompts/send", {"name": "p", "version": 1, "repo": str(repo), "backend": "mock"})
     assert status == 200 and wait_state(ui, "proposed", "idle") == "proposed"
     assert not ui.chat.transcript[0]["text"].endswith("v2")
@@ -357,6 +416,7 @@ def test_library_is_private_versioned_tagged_and_searchable(ui):
     _, res, _ = call(ui, "GET", "/api/prompts/library")
     assert [e["name"] for e in res["entries"]] == ["login-fix", "new-page"] and "text" not in res["entries"][0]
     assert res["entries"][0]["version"] == 2 and res["entries"][0]["versions"] == [1, 2] and res["entries"][0]["tags"] == ["auth"]
+    assert res["entries"][0]["target"] == "claude-code"                                 # the default when not given
     assert [e["name"] for e in call(ui, "GET", "/api/prompts/library?q=flutter")[1]["entries"]] == []      # tags of the latest version only
     assert [e["name"] for e in call(ui, "GET", "/api/prompts/library?q=LOGIN")[1]["entries"]] == ["login-fix"]
     assert [e["name"] for e in call(ui, "GET", "/api/prompts/library?tag=auth")[1]["entries"]] == ["login-fix"]

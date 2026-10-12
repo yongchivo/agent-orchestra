@@ -658,7 +658,7 @@
   // --- Prompt Studio: idea -> questions -> structured prompt -> lint -> copy / library / orchestrator.
   // Everything the model or the library returns is rendered with textContent; the structure,
   // the score and the diff come from the server, never from HTML.
-  const ps = { loaded: false, view: { modes: [], templates: [] }, mode: 'create', questions: [], result: null, lib: [], entry: null, busy: false };
+  const ps = { loaded: false, view: { modes: [], templates: [] }, mode: 'create', target: 'claude-code', questions: [], result: null, lib: [], entry: null, busy: false };
   const psBusy = on => { ps.busy = on; ['psGenerate', 'psAnswer', 'psSkip'].forEach(id => { $(id).disabled = on; }); $('psState').textContent = on ? t('ps.generating') : ''; };
   const psErr = msgs => setList($('psErrors'), msgs);
   function psModel() {
@@ -668,7 +668,7 @@
     return { model: $('psFable').getAttribute('aria-pressed') === 'true' && first ? first : prof.model, effort: prof.effort };
   }
   function psBody() {
-    const b = { mode: ps.mode, idea: $('ps-idea').value.trim(), kind: $('ps-kind').value, goal: $('ps-goal').value, stack: $('ps-stack').value,
+    const b = { mode: ps.mode, target: ps.target, idea: $('ps-idea').value.trim(), kind: $('ps-kind').value, goal: $('ps-goal').value, stack: $('ps-stack').value,
                 avoid: $('ps-avoid').value, detail: $('ps-detail').value, lang: $('ps-lang').value, backend: $('backend').value, ...psModel() };
     const repo = $('repo').value.trim(); if (repo) b.repo = repo;
     const tpl = $('ps-template').value; if (tpl) b.template = tpl;
@@ -676,7 +676,14 @@
     if (ps.mode === 'edit') b.changes = $('ps-changes').value;
     return b;
   }
+  function setTarget(target) {
+    ps.target = target === 'uno' ? 'uno' : 'claude-code';
+    $('psTarget').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.target === ps.target)));
+    $('psTargetHint').textContent = t('ps.target.hint.' + ps.target);
+  }
+  $('psTarget').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTarget(b.dataset.target); });
   function renderModes() {
+    setTarget(ps.target);
     const box = $('psModes'); clear(box);
     ps.view.modes.forEach(m => {
       const b = el('button', 'ghost', t('ps.mode.' + m)); b.type = 'button'; b.setAttribute('aria-pressed', String(m === ps.mode));
@@ -754,7 +761,7 @@
     body = body || psBody(); body.answers = answers;
     if (overrideOnly(body.model) && !body.confirm_override_only) { if (!confirm(t('ps.confirmFable'))) return; body.confirm_override_only = true; }
     psBusy(true); $('psQuestions').hidden = true;
-    try { ps.result = await api('/api/prompts/generate', body); ps.entry = null; renderResult(ps.result); $('psName').value = ''; $('studioOut').scrollIntoView({ behavior: 'smooth' }); }
+    try { ps.result = await api('/api/prompts/generate', body); ps.last = body; ps.entry = null; renderResult(ps.result); $('psName').value = ''; $('studioOut').scrollIntoView({ behavior: 'smooth' }); }
     catch (e) { psErr([e.message]); }
     finally { psBusy(false); }
   }
@@ -773,7 +780,7 @@
     $('psEmpty').hidden = true; $('psResult').hidden = false;
     $('psText').value = r.text;
     renderLint(r.lint);
-    $('psMeta').textContent = [t('ps.mode.' + r.mode), r.lang, r.template, usageText({ model: r.model, effort: r.effort, override_only: r.override_only })].filter(Boolean).join(' · ');
+    $('psMeta').textContent = [t('ps.mode.' + r.mode), t('ps.target.' + (r.target || 'claude-code')), r.lang, r.template, usageText({ model: r.model, effort: r.effort, override_only: r.override_only })].filter(Boolean).join(' · ');
     setList($('psAssumptions'), (r.assumptions || []).length ? r.assumptions : [t('ps.none')]);
     setList($('psOpen'), (r.open_questions || []).length ? r.open_questions : [t('ps.none')]);
     const rv = $('psReview'); rv.hidden = !r.review;
@@ -787,7 +794,7 @@
   let lintTimer = null;
   $('psText').addEventListener('input', () => {
     clearTimeout(lintTimer);
-    lintTimer = setTimeout(async () => { try { renderLint(await api('/api/prompts/lint', { text: $('psText').value })); } catch (e) { psErr([e.message]); } }, 500);
+    lintTimer = setTimeout(async () => { try { renderLint(await api('/api/prompts/lint', { text: $('psText').value, target: (ps.result || {}).target || ps.target })); } catch (e) { psErr([e.message]); } }, 500);
   });
   $('psRolesOpen').addEventListener('click', () => {
     const name = (ps.result && ps.result.missing_roles || [])[0];
@@ -797,22 +804,32 @@
   $('psSave').addEventListener('click', async () => {
     const r = ps.result || {}, name = $('psName').value.trim();
     if (!name) return psErr([t('ps.err.name')]);
-    const body = { name, text: $('psText').value, tags: $('psTags').value.split(/[\s,]+/).filter(Boolean), mode: r.mode || ps.mode, lang: r.lang || $('ps-lang').value,
+    const body = { name, text: $('psText').value, tags: $('psTags').value.split(/[\s,]+/).filter(Boolean), mode: r.mode || ps.mode, lang: r.lang || $('ps-lang').value, target: r.target || ps.target,
                    idea: r.idea || $('ps-idea').value.trim(), score: (r.lint || {}).score || 0, model: r.model || '', effort: r.effort || '' };
     try { const s = await api('/api/prompts/library', body); psErr([]); $('psState').textContent = t('ps.saved', { name: s.saved, n: s.version }); loadLibrary(); }
     catch (e) { psErr([e.message]); }
   });
-  async function psSend(text) {
+  // Only a prompt generated for Uno is sent (the server checks it too); one generated for Claude
+  // Code is regenerated for Uno with the same inputs and answers, never sent as it is.
+  async function psSend(text, target, regenerate) {
     const repo = $('repo').value.trim();
     if (!repo) return psErr([t('err.noproject')]);
+    if (target !== 'uno') { if (regenerate && confirm(t('ps.send.regenerate'))) regenerate(); else psErr([t('ps.send.notUno')]); return; }
     if (!confirm(t('ps.send.confirm'))) return;
     try {
-      await api('/api/prompts/send', { text, repo, backend: $('backend').value, parallel: parseInt($('parallel').value, 10) || 0,
+      await api('/api/prompts/send', { text, target, repo, backend: $('backend').value, parallel: parseInt($('parallel').value, 10) || 0,
                                        max_iterations: parseInt($('iters').value, 10) || 0, ...runSettings() });
       psErr([]); setTab('orchestra'); refreshPipeline();
     } catch (e) { psErr([e.message]); }
   }
-  $('psSend').addEventListener('click', () => psSend($('psText').value));
+  $('psSend').addEventListener('click', () => {
+    const r = ps.result || {};
+    psSend($('psText').value, r.target, () => {
+      setTarget('uno');
+      if (ps.last) psGenerate(ps.last.answers || [], { ...ps.last, target: 'uno', confirm_override_only: undefined });
+      else psStart();
+    });
+  });
 
   // library: versions, tags, search; the diff between two versions is computed by the server.
   let libTimer = null;
@@ -829,14 +846,14 @@
     ps.lib.forEach(e => {
       const row = el('div', 'librow' + (ps.entry && ps.entry.name === e.name ? ' current' : ''));
       const head = el('div', 'head');
-      head.appendChild(el('b', '', e.name)); head.appendChild(el('span', 'hint', `v${e.version} · ${t('ps.mode.' + e.mode)} · ${e.lang}`));
+      head.appendChild(el('b', '', e.name)); head.appendChild(el('span', 'hint', `v${e.version} · ${t('ps.mode.' + e.mode)} · ${t('ps.target.' + (e.target || 'claude-code'))} · ${e.lang}`));
       const sc = el('span', 'badge ' + (e.score >= 80 ? 'ok' : e.score >= 50 ? 'warn' : 'bad'), String(e.score)); head.appendChild(sc);
       (e.tags || []).forEach(tag => head.appendChild(el('span', 'tag', tag)));
       row.appendChild(head);
       row.appendChild(el('div', 'hint idea', e.idea || ''));
       const acts = el('div', 'row');
       const open = el('button', 'ghost small', t('ps.lib.open')); open.type = 'button'; open.addEventListener('click', () => openEntry(e.name)); acts.appendChild(open);
-      const send = el('button', 'ghost small', t('ps.send')); send.type = 'button'; send.addEventListener('click', async () => { try { psSend((await api('/api/prompts/library?name=' + encodeURIComponent(e.name))).text); } catch (x) { psErr([x.message]); } }); acts.appendChild(send);
+      const send = el('button', 'ghost small', t('ps.send')); send.type = 'button'; send.addEventListener('click', async () => { try { const en = await api('/api/prompts/library?name=' + encodeURIComponent(e.name)); psSend(en.text, en.target, () => { ps.mode = en.mode; $('ps-idea').value = en.idea || ''; setTarget('uno'); renderModes(); psStart(); }); } catch (x) { psErr([x.message]); } }); acts.appendChild(send);
       const del = el('button', 'ghost small', t('ps.lib.delete')); del.type = 'button';
       del.addEventListener('click', async () => { if (!confirm(t('ps.lib.confirmDelete', { name: e.name }))) return; try { await api('/api/prompts/library/delete', { name: e.name }); if (ps.entry && ps.entry.name === e.name) ps.entry = null; loadLibrary(); } catch (x) { psErr([x.message]); } });
       acts.appendChild(del); row.appendChild(acts); box.appendChild(row);
@@ -851,8 +868,8 @@
   async function openEntry(name, version) {
     try {
       const e = await api('/api/prompts/library?name=' + encodeURIComponent(name) + (version ? '&version=' + version : ''));
-      const lint = await api('/api/prompts/lint', { text: e.text });
-      ps.entry = e; ps.result = { text: e.text, lint, mode: e.mode, lang: e.lang, model: e.model, effort: e.effort, assumptions: [], open_questions: [], missing_roles: [], idea: e.idea, template: `v${e.version}` };
+      const lint = await api('/api/prompts/lint', { text: e.text, target: e.target });
+      ps.entry = e; ps.result = { text: e.text, lint, mode: e.mode, lang: e.lang, target: e.target, model: e.model, effort: e.effort, assumptions: [], open_questions: [], missing_roles: [], idea: e.idea, template: `v${e.version}` };
       renderResult(ps.result); $('psName').value = e.name; $('psTags').value = (e.tags || []).join(' '); renderLibrary(); psErr([]);
     } catch (x) { psErr([x.message]); }
   }

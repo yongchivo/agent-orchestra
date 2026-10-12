@@ -741,9 +741,18 @@ The "Prompts" tab turns one sentence into a structured, detailed prompt for an A
 agent, and never confuses detailed with invented: what is missing is asked first, what had to
 be assumed is listed apart. Six modes: **Create**, **Fix**, **Improve**, **Audit**, **Review**
 (a prompt you wrote → grade, problems, improved version) and **Edit** (your prompt plus the
-changes you want → new version with the diff). Simple mode is the sentence, a mode and
-Generate; Advanced adds type, goal, stack, what not to touch, level of detail (brief /
+changes you want → new version with the diff). Simple mode is the sentence, a mode, a target
+and Generate; Advanced adds type, goal, stack, what not to touch, level of detail (brief /
 standard / exhaustive), output language (ES / EN), the template and the exact model.
+
+**Target.** Who will run the prompt changes what it says about git. *Claude Code*: one agent
+in a session, with one policy in every mode: small commits on the working branch are allowed,
+push and pull request only after your confirmation (stated once in STOP POINTS and once in
+CLOSING). *Uno's orchestrator*: the planner splits the prompt between the project's roles, and
+Uno's agents never commit, push, create branches or open pull requests (the orchestrator
+creates the branches and merges after your approval), so the prompt carries no such
+instruction, each task is one responsibility a single role can own, SCOPE uses the roles'
+paths and CLOSING says what you will review (the consolidated diff and the findings).
 
 **Two steps, by a model without tools.** First the clarification: Claude is run exactly like
 the planner (`--tools ""`, `--restricted`, no MCP, a JSON schema) and returns at most five
@@ -772,15 +781,18 @@ maximum, and Fable is only a per-request override that asks for its own confirma
 a score from 0 to 100 and the reasons: missing, duplicated or empty sections; no "out of
 scope"; unnumbered tasks; acceptance criteria that are not verifiable ("works well" with no
 command, number or observable); no tests; no stop point; placeholders left in (`<NAME>`,
-`{{x}}`, TODO); excessive length; secrets. Review mode shows your original prompt's score
-next to the model's grade and problems.
+`{{x}}`, TODO); excessive length; secrets; and, for a prompt whose target is Uno, any
+instruction about branches, commits, pushes or pull requests. Review mode shows your original
+prompt's score next to the model's grade and problems.
 
 **Actions.** Copy. Save to the library, `~/.uno-orchestra/prompts/library/<name>/<N>.json`
 (0700 / 0600, outside any repository): every save is a new version, with tags, searchable by
 name, tag, idea or text and filterable by mode; two versions can be compared (unified diff
 computed by the server). **Send to the orchestrator** hands the prompt to the planner exactly
 like a chat message: the plan appears under "Review & approval" and nothing runs until you
-approve it there; a prompt in which the linter still finds a secret is refused. If the prompt
+approve it there; a prompt in which the linter still finds a secret is refused, and so is one
+generated for Claude Code (the page offers to regenerate it for Uno with the same inputs and
+answers instead of sending it as it is; the server checks the target too). If the prompt
 suggests roles the project does not have, the page says which and opens the role manager with
 the name prefilled; Uno never creates roles by itself.
 
@@ -790,8 +802,9 @@ the name prefilled; Uno never creates roles by itself.
 `~/.uno-orchestra/prompts/templates/<name>/<N>.json`, a personal version shadows the built-in
 of the same name, and deleting your versions restores it. Templates never carry a model.
 
-Two complete outputs (a Fix prompt in Spanish and a Create prompt in English, generated on a
-fictional three-file Flask app, clarification questions skipped) are in
+Two complete outputs (a Fix prompt in Spanish for Uno's orchestrator and a Create prompt in
+English for Claude Code, generated on a fictional three-file Flask app, clarification
+questions skipped) are in
 [docs/prompt-studio-examples.md](docs/prompt-studio-examples.md).
 
 | Control | Test |
@@ -803,6 +816,8 @@ fictional three-file Flask app, clarification questions skipped) are in
 | Generator without tools, with its own schema | `test_generator_runs_with_no_tools_and_its_own_schema` |
 | Linter detects each problem, deterministic, ES and EN | `test_linter_detects_each_problem`, `test_lint_endpoint_and_dictionaries_cover_every_code` |
 | Send opens a plan and never runs; refuses secrets; chat limit unchanged | `test_send_to_orchestrator_opens_a_plan_and_never_runs`, `test_send_from_the_library_by_name_and_version` |
+| Target shapes the system prompt; one git policy for Claude Code; none for Uno; linter flags git instructions for Uno | `test_targets_shape_the_system_prompt_and_the_output` |
+| Send requires a prompt generated for Uno; the page offers to regenerate | `test_send_requires_a_prompt_generated_for_uno` |
 | Fable impossible without override and confirmation; one generation at a time | `test_fable_is_impossible_without_override_and_confirmation` |
 | Library 0700 / 0600, versions, tags, search, diff, tampered files | `test_library_is_private_versioned_tagged_and_searchable` |
 | Templates built-in and personal | `test_templates_builtin_and_personal_versions` |

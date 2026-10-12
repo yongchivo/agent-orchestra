@@ -268,5 +268,13 @@
   "roles.state.count": "{n} roles",
   "roles.state.uncommitted": "uncommitted: {files}",
   "roles.state.truncated": "context truncated: {n} characters of {doc} omitted (agents can Read the file)",
-  "review.findings.count": "{n} findings"
+  "review.findings.count": "{n} findings",
+  "ps.target": "target",
+  "ps.target.claude-code": "Claude Code",
+  "ps.target.uno": "Uno's orchestrator",
+  "ps.target.hint.claude-code": "one agent in a session: small commits on the working branch; push and PR only with your confirmation",
+  "ps.target.hint.uno": "the planner splits the tasks between the roles; no branches, commits or PRs (the orchestrator manages them)",
+  "ps.send.notUno": "This prompt was generated for Claude Code: generate one with target “Uno's orchestrator” before sending it.",
+  "ps.send.regenerate": "This prompt was generated for Claude Code (branches, commits, PR). Regenerate it for “Uno's orchestrator” with the same inputs? It will not be sent as it is.",
+  "lint.git_instructions": "target Uno: branch, commit, push or PR instruction (Uno's agents never run them)"
 }
