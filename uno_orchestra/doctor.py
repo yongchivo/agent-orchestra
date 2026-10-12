@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import roles as roles_mod, state, worktree
+from . import config, roles as roles_mod, state, worktree
 from .worker import agent_env
 
 MIN_PYTHON = (3, 10)
@@ -30,23 +30,34 @@ def check_git(which=shutil.which):
     return OK, "git", out, ""
 
 
-def check_claude(which=shutil.which, env=None):
+def check_claude(which=shutil.which, env=None, state_dir=None):
+    """The CLI, then the active auth mode: account (the CLI login) or api-key (uno config)."""
     exe = which("claude")
     if not exe:
         return FAIL, "claude CLI", "not found on PATH", \
             "install Claude Code: npm install -g @anthropic-ai/claude-code (or see https://docs.anthropic.com/claude-code)"
-    env = agent_env() if env is None else env
-    if "ANTHROPIC_API_KEY" in env:
-        return OK, "claude login", "ANTHROPIC_API_KEY is set (agents run with --bare)", ""
+    environ = os.environ if env is None else env
+    auth = config.auth_mode(state_dir) if state_dir is not None else "account"
+    key_set = "ANTHROPIC_API_KEY" in environ
+    if auth == "api-key":
+        if key_set:
+            return OK, "auth", "api-key: ANTHROPIC_API_KEY from the environment (agents run with --bare)", ""
+        return FAIL, "auth", "api-key mode but ANTHROPIC_API_KEY is not set", \
+            "export ANTHROPIC_API_KEY=...   or go back to your login: uno config set auth account"
+    env = agent_env(environ, auth="account")
     try:
         r = subprocess.run([exe, "auth", "status"], capture_output=True, text=True, timeout=30, env=env,
                            stdin=subprocess.DEVNULL)
         info = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
     except (OSError, subprocess.TimeoutExpired, ValueError):
         info = {}
+    ignored = ("; ANTHROPIC_API_KEY is set in the environment but IGNORED (uno config set auth api-key to use it)"
+               if key_set else "")
     if info.get("loggedIn"):
-        return OK, "claude login", f"logged in ({info.get('authMethod', '?')}, {info.get('email', '')})".replace(", )", ")"), ""
-    return FAIL, "claude login", "not logged in", "run: claude auth login   (or export ANTHROPIC_API_KEY)"
+        detail = f"account: logged in ({info.get('authMethod', '?')}, {info.get('email', '')})".replace(", )", ")")
+        return (WARN if key_set else OK), "auth", detail + ignored, ""
+    return FAIL, "auth", "account mode but the Claude CLI is not logged in" + ignored, \
+        "run: claude auth login   (or, to use the key: uno config set auth api-key)"
 
 
 def check_state_dir(state_dir):
@@ -121,7 +132,7 @@ def check_shadowing(which=shutil.which, argv0=None):
 
 def run(path, state_dir, say=print, home=None, which=shutil.which, env=None, argv0=None):
     """Print every check and return the number of failures (the exit code)."""
-    results = [check_python(), check_git(which), check_claude(which, env), check_state_dir(state_dir),
+    results = [check_python(), check_git(which), check_claude(which, env, state_dir), check_state_dir(state_dir),
                check_legacy_state(home), *check_project(path, state_dir), check_shadowing(which, argv0)]
     for status, name, detail, fix in results:
         say(f"[{status:>4}] {name}: {detail}")

@@ -72,10 +72,19 @@ whether to **reference** the file by path (one line, `Read <file> when you need:
 agents have `Read`), **embed** it or skip it; the default is to reference anything that would not
 fit in the 4000-character context. An embedded document that does not fit is cut at the last
 markdown heading that does, the context says how many characters were left out, and `uno init`
-and the Roles & project panel both report it. The roles it writes are recorded as confirmed by you
+and the Roles & project panel both report it. Referenced documents are validated when
+`.uno/project.json` is loaded (relative paths inside the repository, no `..`, no symlink leaving
+it, `.md`/`.txt` only, never a protected or credential file) and their content is part of the
+trust fingerprint: if one changes, the UI asks you to confirm again, exactly as for a role, and
+every run re-checks it when it starts. The roles it writes are recorded as confirmed by you
 (the same fingerprint the UI uses, in `~/.uno-orchestra/trust.json`). Running it again does
 nothing; `uno init --force` regenerates the proposed roles after asking (roles you added are kept).
 In a folder that is not a repository it offers `git init` plus an initial commit.
+
+**Authentication.** Uno uses your Claude CLI login (`claude auth login`). An `ANTHROPIC_API_KEY`
+in the environment is **not** passed to the agents or the planner unless you opt in with
+`uno config set auth api-key`; `uno doctor` shows the active mode and warns when a key is being
+ignored. In `api-key` mode the agents also run with `--bare` (see Security controls).
 
 **Commands**
 
@@ -86,6 +95,7 @@ In a folder that is not a repository it offers `git init` plus an initial commit
 | `uno run tasks.json [--repo .] [--backend claude\|mock] [--parallel 3]` | Parallel mode from the terminal; events go to `~/.uno-orchestra/events.jsonl` |
 | `uno doctor [PATH]` | One check per prerequisite with the fix for each failure; exit code 1 when any check fails |
 | `uno dashboard [--events FILE] [--port 8765]` | Live dashboard tailing the event log |
+| `uno config [get KEY \| set KEY VALUE]` | Settings in `~/.uno-orchestra/config.json` (0600). `auth`: `account` (default, the Claude CLI login) or `api-key` |
 | `uno --version`, `uno <command> -h` | Version and per-command help |
 
 Every command takes `--state-dir DIR` (default `~/.uno-orchestra`).
@@ -474,9 +484,13 @@ attackers. Flags were verified against `claude --help` of Claude Code 2.1.296.
   Bash back.
 - `--permission-mode dontAsk --permission-prompts none`: anything that would prompt is denied.
 - `--no-session-persistence`: no transcript with repository contents is written to disk.
-- `--bare` is added when `ANTHROPIC_API_KEY` is set: it also skips the repository's CLAUDE.md,
-  skills and plugins. Bare mode never reads OAuth credentials, so with a subscription login the
-  repository's CLAUDE.md can still reach the model (see residual risks).
+- The subprocess environment is an allowlist (`PATH`, `HOME`, `LANG`, `TERM`, `USER`, `TMPDIR`
+  and the CLI's own login variables). `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `ANTHROPIC_BASE_URL` are passed only with `uno config set auth api-key`; their mere presence
+  in the environment changes nothing.
+- `--bare` is added in `api-key` mode: it also skips the repository's CLAUDE.md, skills and
+  plugins. Bare mode never reads OAuth credentials, so with the account login the repository's
+  CLAUDE.md can still reach the model (see residual risks).
 
 **Subprocess environment**
 
@@ -574,7 +588,8 @@ on the branch), the user's Anthropic quota, and the event log.
   write bad code. The gate limits where, not what. Review the diff before you ship it.
 - **Agent instruction files with OAuth login.** A repository's `CLAUDE.md`, `AGENTS.md` or
   `.claude/` can carry prompt injection. Only `--bare` skips them, and bare mode requires
-  `ANTHROPIC_API_KEY`. With a subscription login they are loaded into context; the preflight
+  `ANTHROPIC_API_KEY` with `uno config set auth api-key`. With the account login they are loaded
+  into context; the preflight
   warning tells you when that is the case, and the merge gate still limits what such an agent
   can land.
 - **`--restricted` is a Claude Code feature.** The confinement of the file tools and the

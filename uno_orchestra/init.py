@@ -419,6 +419,11 @@ def run(path, state_dir, ask=None, say=print, force=False):
         protected = roles_mod.check_protected_paths(ask("    protected paths (space-separated; empty for none)", " ".join(protected)).split())
     docs = []
     for name in ([n for n in ("CLAUDE.md", "AGENTS.md") if analysis[n[:-3].lower() + "_md"]] + analysis["instruction_files"]):
+        try:
+            roles_mod.check_references(repo, [name], protected)
+        except ValueError as exc:
+            say(f"warning: {name} skipped: {exc}")
+            continue
         content = (repo / name).read_text(encoding="utf-8", errors="replace")
         room = MAX_CONTEXT - len(project_context(analysis, docs)[0]) - len(name) - 12
         fits = len(content) <= room
@@ -435,7 +440,8 @@ def run(path, state_dir, ask=None, say=print, force=False):
     for role in roles:
         roles_mod.save_role(repo, role)
     roles_mod.save_project_context(repo, text)
-    roles_mod.save_protected_paths(repo, protected, truncated)
+    roles_mod.save_protected_paths(repo, protected, truncated,
+                                   references=[name for name, _, mode in docs if mode == "reference"])
     roles_mod.trust(repo, state_dir)   # written by the user, through this command: confirmed
     changed = ensure_gitignore(repo)
     say(f"Wrote {roles_mod.DIR}/project.json and {roles_mod.DIR}/roles/{{{','.join(r.name for r in roles)}}}.json"

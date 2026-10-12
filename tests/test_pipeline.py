@@ -544,10 +544,10 @@ def test_planner_never_receives_agent_text(ui, repo, monkeypatch):
     seen = []
     real = pipeline.propose
 
-    def spy(request, roles, project_context, backend="claude", transcript=(), history=(), rejected=None, cwd=None):
+    def spy(request, roles, project_context, backend="claude", transcript=(), history=(), rejected=None, cwd=None, **kw):
         seen.append({"request": request, "transcript": list(transcript), "history": list(history),
                      "prompt": pipeline.planner_prompt(request, transcript, history, rejected)})
-        return real(request, roles, project_context, backend, transcript, history, rejected, cwd)
+        return real(request, roles, project_context, backend, transcript, history, rejected, cwd, **kw)
     monkeypatch.setattr(pipeline, "propose", spy)
 
     assert chat(ui, repo, "add a feature")[0] == 200 and wait_state(ui, "proposed")

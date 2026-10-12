@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import orchestrator, roles as roles_mod, scope, state, worktree
+from . import config, orchestrator, roles as roles_mod, scope, state, worktree
 from .worker import FINDINGS_SCHEMA, Task, Worker, agent_env, write_agent_config
 
 MAX_STEPS = 8
@@ -175,16 +175,16 @@ def planner_system_prompt(roles, project_context, max_steps=MAX_STEPS):
     return "\n".join(lines)
 
 
-def planner_command(request, system, max_turns=3, env=None):
+def planner_command(request, system, max_turns=3, env=None, auth="account"):
     """Claude with no tools at all, structured JSON output, nothing from the repository."""
-    env = agent_env() if env is None else env
+    env = agent_env(auth=auth) if env is None else env
     cmd = ["claude", "-p", request, "--output-format", "json",
            "--json-schema", json.dumps(PLAN_SCHEMA), "--system-prompt", system,
            "--tools", "", "--allowedTools", "", "--disallowedTools", "Bash,WebFetch,WebSearch,mcp__*",
            "--restricted", "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
            "--permission-mode", "dontAsk", "--permission-prompts", "none",
            "--disable-slash-commands", "--no-session-persistence", "--max-turns", str(max_turns)]
-    if "ANTHROPIC_API_KEY" in env:
+    if auth == "api-key" and "ANTHROPIC_API_KEY" in env:
         cmd.append("--bare")
     return cmd
 
@@ -225,7 +225,7 @@ def planner_prompt(request, transcript=(), history=(), rejected=None):
 
 
 def propose(request, roles, project_context, backend="claude", transcript=(), history=(),
-            rejected=None, cwd=None):
+            rejected=None, cwd=None, auth="account"):
     """Ask the planner for a raw plan dict. The mock backend returns a JSON message verbatim
     (so a user or a test can hand it a plan) or a developer -> reviewers chain."""
     if backend == "mock":
@@ -245,7 +245,7 @@ def propose(request, roles, project_context, backend="claude", transcript=(), hi
     system = planner_system_prompt(roles, project_context)
     prompt = planner_prompt(request, transcript, history, rejected)
     try:
-        r = subprocess.run(planner_command(prompt, system), env=agent_env(), cwd=cwd,
+        r = subprocess.run(planner_command(prompt, system, auth=auth), env=agent_env(auth=auth), cwd=cwd,
                            capture_output=True, text=True, timeout=PLANNER_TIMEOUT, check=False,
                            stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -356,6 +356,7 @@ class Pipeline:
         self.max_iterations = max_iterations
         self.timeout = timeout
         self.state_dir = Path(state_dir or state.default_dir())
+        self.auth = config.auth_mode(self.state_dir)
         self.project_context = project_context
         self.base_ref = base_ref       # where the integration branch starts (HEAD, or a previous one)
         self.base = base               # commit the consolidated diff is taken against
@@ -423,7 +424,7 @@ class Pipeline:
             self.bus.emit("orchestrator", "warning", roles_mod.UNCONFIRMED, files=[roles_mod.DIR])
         self.bus.emit("orchestrator", "run_start", f"pipeline: {len(self.steps)} steps on {branch}",
                       run_id=self.run_id, workers=[s.id for s in self.steps], backend=self.backend,
-                      mode="pipeline", roles={s.id: s.role for s in self.steps})
+                      mode="pipeline", roles={s.id: s.role for s in self.steps}, auth=self.auth)
         try:
             await asyncio.wait_for(self._execute(), MAX_DURATION)
         except asyncio.TimeoutError:
@@ -485,7 +486,7 @@ class Pipeline:
         path, s.branch = worktree.create(self.repo, self.run_dir, self.run_id, s.id, s.start)
         prompt = compose_prompt(s, role, self.project_context, self._artifacts(s))
         task = Task(s.id, prompt, s.paths, role.preset, role.max_turns, output=role.output)
-        w = Worker(task, path, s.branch, self.bus, self.backend, self.timeout, self.config_dir)
+        w = Worker(task, path, s.branch, self.bus, self.backend, self.timeout, self.config_dir, auth=self.auth)
         w.round = s.iteration
         self.workers[s.id] = w
         await w.run()

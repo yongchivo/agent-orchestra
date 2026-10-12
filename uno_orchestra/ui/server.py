@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from uno_orchestra import orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra import config, orchestrator, pipeline, roles as roles_mod, scope, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
@@ -209,7 +209,8 @@ class Chat:
         for _ in range(2):  # one retry with the validator's explanation
             try:
                 raw = pipeline.propose(request, self.roles, self.project_context, self.backend,
-                                       self.transcript[:-1], history, rejected, cwd=str(self.srv.state_dir))
+                                       self.transcript[:-1], history, rejected, cwd=str(self.srv.state_dir),
+                                       auth=config.auth_mode(self.srv.state_dir))
                 summary, steps = pipeline.validate_plan(raw, self.roles)
             except pipeline.PlanError as exc:
                 rejected = str(exc)
@@ -573,13 +574,14 @@ class UIServer(ThreadingHTTPServer):
             files = roles_mod.snapshot(repo)
             protected = roles_mod.project_protected_from(files)
             truncated = roles_mod.project_truncated_from(files)
+            references = [{"path": r, "size": len(files[f"../{r}"])} for r in roles_mod.project_references_from(files, repo)]
         except ValueError as exc:
-            error, context, protected, truncated = str(exc), "", [], {}
+            error, context, protected, truncated, references = str(exc), "", [], {}, []
         if error is None and roles_mod.has_legacy_dir(repo):
             error = (f"this repository has a pre-0.1.0 {roles_mod.LEGACY_DIR}/: run `uno init` inside it "
                      f"to rename it to {roles_mod.DIR}/ (roles are read from {roles_mod.DIR}/ only)")
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
-                "protected_paths": protected, "truncated": truncated, "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
+                "protected_paths": protected, "truncated": truncated, "references": references, "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
                 "uncommitted": roles_mod.uncommitted(repo, worktree.git),
                 "trusted": roles_mod.trusted(repo, self.state_dir)}
@@ -615,8 +617,10 @@ class UIServer(ThreadingHTTPServer):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
         roles_mod.load_roles(repo)       # never confirm something that does not validate
         roles_mod.project_context(repo)
-        roles_mod.project_protected_from(roles_mod.snapshot(repo))
-        roles_mod.project_truncated_from(roles_mod.snapshot(repo))
+        files = roles_mod.snapshot(repo)
+        roles_mod.project_protected_from(files)
+        roles_mod.project_truncated_from(files)
+        roles_mod.project_references_from(files, repo)
         return self._edited(repo)
 
     def commit_roles(self, body):
@@ -716,7 +720,8 @@ class Handler(BaseHTTPRequestHandler):
                 "recent_repos": srv.recent_repos(), "templates": srv.templates(),
                 "presets": sorted(PRESETS), "limits": {"parallel": orchestrator.MAX_PARALLEL,
                                                         "tasks": orchestrator.MAX_TASKS},
-                "idle_timeout": srv.idle_timeout, "state_dir": str(srv.state_dir)})
+                "idle_timeout": srv.idle_timeout, "state_dir": str(srv.state_dir),
+                "auth": config.auth_mode(srv.state_dir)})
         if path == "/api/results":
             run = srv.run
             if not run or not run.get("results"):
