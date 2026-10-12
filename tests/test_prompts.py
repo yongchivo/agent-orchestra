@@ -273,7 +273,7 @@ def test_send_to_orchestrator_opens_a_plan_and_never_runs(ui, repo):
     head = git(repo, "rev-parse", "HEAD")
     text = perfect()
     status, body, _ = call(ui, "POST", "/api/prompts/send", {"text": text, "repo": str(repo), "backend": "mock"})
-    assert status == 200 and body["state"] == "planning"
+    assert status == 200 and body["state"] in ("planning", "proposed")   # the mock planner may already be done
     assert wait_state(ui, "proposed", "idle") == "proposed"
     assert not ui.running() and ui.run is None and ui.chat.engine is None            # proposed, not started
     assert ui.chat.transcript[0]["who"] == "you" and ui.chat.transcript[0]["text"].startswith(text[:1000])
