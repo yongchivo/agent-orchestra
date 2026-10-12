@@ -80,9 +80,14 @@ def check_overrides(raw, roles):
             raise ValueError(f"override for unknown role {name!r}")
         if not isinstance(o, dict) or set(o) - {"model", "effort"}:
             raise ValueError(f"override for {name!r}: only 'model' and 'effort' are allowed")
-        models.check(o.get("model", roles[name].model), o.get("effort", roles[name].effort))
+        models.check(o.get("model", roles[name].model), o.get("effort", roles[name].effort), override=True)
         out[name] = {k: o[k] for k in ("model", "effort") if k in o}
     return out
+
+
+def uses_override_only(steps):
+    """Step ids whose effective model is override-only (fable): the UI asks to confirm them."""
+    return [s.id for s in steps if models.is_override_only(s.model)]
 
 
 # --- plan ------------------------------------------------------------------------------------
@@ -112,7 +117,8 @@ class Step:
                 "depends_on": self.depends_on, "status": self.status, "iteration": self.iteration,
                 "branch": self.branch, "files": self.files, "findings": self.findings,
                 "summary": self.summary, "detail": self.detail, "model": self.model, "effort": self.effort,
-                "profile": models.profile_of(self.model, self.effort), "usage": self.usage}
+                "profile": models.profile_of(self.model, self.effort),
+                "override_only": models.is_override_only(self.model), "usage": self.usage}
 
 
 def _covered(path, globs):
@@ -134,6 +140,9 @@ def validate_plan(raw, roles, max_steps=MAX_STEPS):
     for i, s in enumerate(steps_raw, 1):
         if not isinstance(s, dict):
             raise PlanError(f"step {i}: must be an object")
+        # The planner never chooses models: a 'model' or 'effort' in its output is ignored; the
+        # code assigns each step's pair from the role and the user's overrides.
+        s = {k: v for k, v in s.items() if k not in ("model", "effort")}
         unknown = sorted(set(s) - STEP_FIELDS)
         if unknown:
             raise PlanError(f"step {i}: unknown fields {unknown}")
@@ -203,7 +212,7 @@ def planner_command(request, system, max_turns=3, env=None, auth="account", mode
     default = models.default_for("planner")
     model = default[0] if model is None else model   # only None means "default": "" is rejected below
     effort = default[1] if effort is None else effort
-    models.check(model, effort)
+    models.check(model, effort, override=True)       # the per-request choice may be fable; the settings cannot
     cmd = ["claude", "-p", request, "--output-format", "json", "--model", model, "--effort", effort,
            "--json-schema", json.dumps(PLAN_SCHEMA), "--system-prompt", system,
            "--tools", "", "--allowedTools", "", "--disallowedTools", "Bash,WebFetch,WebSearch,mcp__*",

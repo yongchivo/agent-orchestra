@@ -166,5 +166,10 @@
   "chat.overrides.hint": "Modelo y esfuerzo solo para la próxima ejecución (el rol guardado no cambia). La primera fila es el orquestador.",
   "chat.planner": "orquestador",
   "review.maxNote": "🧠 Este plan usa perfiles Máximo: consumen más del límite de la suscripción.",
-  "usage.turns": "turnos"
+  "usage.turns": "turnos",
+  "chat.special": "Fable solo en esta ejecución:",
+  "chat.special.planner": "orquestador",
+  "review.confirmFable": "Este plan usa Fable (consumo independiente de tu límite normal). ¿Continuar?",
+  "review.fableNote": "🔮 Este plan usa Fable: consumo independiente de tu límite normal; se pedirá confirmación.",
+  "usage.fable": "FABLE"
 }

@@ -693,7 +693,7 @@ def test_api_key_is_ignored_unless_configured(tmp_path, repo, monkeypatch, capsy
     state_dir = tmp_path / "s"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key-000000")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://proxy.local")
-    assert config.load(state_dir) == {"auth": "account", "planner_model": "fable", "planner_effort": "max"}                    # no file yet: default
+    assert config.load(state_dir) == {"auth": "account", "planner_model": "sonnet", "planner_effort": "high"}                    # no file yet: default
     # account mode: the planner and the workers never see the key and never run --bare
     cmd = pipeline.planner_command("r", "s")
     assert "--bare" not in cmd and "ANTHROPIC_API_KEY" not in pipeline.agent_env()
@@ -719,7 +719,7 @@ def test_api_key_is_ignored_unless_configured(tmp_path, repo, monkeypatch, capsy
         assert cli.main(["config", "set", "auth", "api-key", "--state-dir", str(state_dir)]) == 0
         assert "auth = api-key" in capsys.readouterr().out
         assert stat.S_IMODE((state_dir / "config.json").stat().st_mode) == 0o600
-        assert json.loads((state_dir / "config.json").read_text()) == {"auth": "api-key", "planner_model": "fable", "planner_effort": "max"}
+        assert json.loads((state_dir / "config.json").read_text()) == {"auth": "api-key", "planner_model": "sonnet", "planner_effort": "high"}
         assert cli.main(["config", "get", "auth", "--state-dir", str(state_dir)]) == 0 and capsys.readouterr().out.strip() == "api-key"
         asyncio.run(orchestrator.run(repo, [Task("a", "p", ["**"])], EventBus(tmp_path / "e2.jsonl"),
                                      backend="mock", state_dir=state_dir))

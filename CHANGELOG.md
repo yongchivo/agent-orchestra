@@ -64,10 +64,16 @@ third-party dependencies.
   and simple-mode profiles (verified against Claude Code 2.1.296: `--model`, `--effort
   low|medium|high|xhigh|max`; and against the account's login: fable, opus, sonnet, haiku).
   Each role carries its own `model` and `effort`; the planner's come from `uno config`
-  (`planner_model`, `planner_effort`). Simple mode offers three profiles per role
-  (⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = fable/max; defaults: planner
-  and security-analyst Max, architect and developer Balanced, tester Fast); Advanced sets
-  the exact pair and can override it for one run (the role file is untouched). A note next
+  (`planner_model`, `planner_effort`). Opus is the maximum for every role, agent and the
+  planner. Simple mode offers three profiles per role (⚡ Fast = haiku/medium, ⚖️ Balanced =
+  sonnet/high, 🧠 Max = opus/max; defaults: planner Balanced, security-analyst Max,
+  architect and developer Balanced, tester Fast); Advanced sets the exact pair and can
+  override it for one run (the role file is untouched). **Fable is override-only**: never a
+  default, refused by the schema in roles, templates, run templates and settings (a
+  repository role file with it is invalid), ignored if the planner's output names a model,
+  chosen only per run from the UI (chips in simple mode, the table in advanced), with a
+  separate confirmation when approving a plan that uses it; no fallback or retry can reach
+  it; every event and result marks its use. A note next
   to Approve says when the plan uses Max profiles. Every `start` event and every result
   records the model and effort requested, the model the CLI reported, the turns and the
   seconds. A model the CLI rejects is a clear error naming the alternatives, never a silent

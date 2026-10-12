@@ -166,5 +166,10 @@
   "chat.overrides.hint": "Model and effort for the next run only (the saved role does not change). The first row is the orchestrator.",
   "chat.planner": "orchestrator",
   "review.maxNote": "🧠 This plan uses Max profiles: they eat more of the subscription's limit.",
-  "usage.turns": "turns"
+  "usage.turns": "turns",
+  "chat.special": "Fable for this run only:",
+  "chat.special.planner": "orchestrator",
+  "review.confirmFable": "This plan uses Fable (billed outside your normal limit). Continue?",
+  "review.fableNote": "🔮 This plan uses Fable: billed outside your normal limit; you will be asked to confirm.",
+  "usage.fable": "FABLE"
 }

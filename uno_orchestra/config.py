@@ -15,7 +15,7 @@ from pathlib import Path
 from . import models
 
 FILE = "config.json"
-CHOICES = {"auth": ("account", "api-key"), "planner_model": tuple(models.MODELS), "planner_effort": tuple(models.EFFORTS)}
+CHOICES = {"auth": ("account", "api-key"), "planner_model": tuple(models.SAVEABLE), "planner_effort": tuple(models.EFFORTS)}
 DEFAULTS = {"auth": "account", "planner_model": models.default_for("planner")[0],
             "planner_effort": models.default_for("planner")[1]}
 

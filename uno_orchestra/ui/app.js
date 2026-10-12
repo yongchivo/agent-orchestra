@@ -277,10 +277,10 @@
         Object.entries(e.roles || {}).forEach(([w, r]) => roleOf.set(w, r));
         setAgent('orchestrator', 'running', undefined, e.message); (e.workers || []).forEach(w => nodeFor(w));
         lastRun = { id: e.run_id, backend: e.backend }; $('liveTitle').textContent = t('agents.run', lastRun); break;
-      case 'start': setAgent(e.source, 'running', 0, e.message); if (e.model) nodeFor(e.source).node.querySelector('.role').textContent = `${roleOf.get(e.source) || ''} · ${e.model} · ${e.effort}`.replace(/^ · /, ''); pulse('orchestrator', e.source); break;
+      case 'start': setAgent(e.source, 'running', 0, e.message); if (e.model) { const rl = nodeFor(e.source).node.querySelector('.role'); rl.textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); rl.classList.toggle('fable', !!e.override_only); } pulse('orchestrator', e.source); break;
       case 'progress': setAgent(e.source, 'running', e.progress); return;  // shown on the node only
       case 'tool': case 'say': setAgent(e.source, undefined, undefined, e.message); break;
-      case 'done': setAgent(e.source, 'done', 100, e.message); if (e.model) nodeFor(e.source).node.querySelector('.role').textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); pulse(e.source, 'orchestrator'); break;
+      case 'done': setAgent(e.source, 'done', 100, e.message); if (e.model) { const rl = nodeFor(e.source).node.querySelector('.role'); rl.textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); rl.classList.toggle('fable', !!e.override_only); } pulse(e.source, 'orchestrator'); break;
       case 'failed': setAgent(e.source, 'failed', undefined, e.message); break;
       case 'conflict': case 'out_of_scope': case 'needs_review': setAgent(e.target, e.kind, undefined, e.message); pulse('orchestrator', e.target); break;
       case 'merge': setAgent(e.target, 'merged', 100, e.message); pulse('orchestrator', e.target); break;
@@ -365,7 +365,7 @@
       const head = el('div', 'head');
       head.appendChild(chip(a.verdict)); head.appendChild(el('b', '', a.name));
       head.appendChild(el('span', 'hint', `preset ${a.preset} · paths ${a.paths.join(' ')} · ${a.branch || '—'}`));
-      if (a.usage) head.appendChild(el('span', 'usage', usageText(a.usage)));
+      if (a.usage) head.appendChild(el('span', 'usage' + (a.usage.override_only ? ' fable' : ''), usageText(a.usage)));
       card.appendChild(head);
       if (a.detail) card.appendChild(el('div', 'detail', a.detail));
       if (a.commands.length) {
@@ -382,8 +382,10 @@
   let catalog = { models: [], efforts: [], profiles: {}, role_defaults: {} };
   const profileOf = (model, effort) => Object.keys(catalog.profiles).find(n => catalog.profiles[n].model === model && catalog.profiles[n].effort === effort) || '';
   const defaultPair = name => catalog.profiles[catalog.role_defaults[name] || catalog.role_defaults['*']] || { model: '', effort: '' };
-  function modelSelect(sel, value) {
-    clear(sel); catalog.models.forEach(m => { const o = el('option', '', m.label || m.id); o.value = m.id; sel.appendChild(o); });
+  const overrideOnly = id => (catalog.override_only || []).includes(id);
+  function modelSelect(sel, value, perRun) {
+    // Saved things (roles, templates) never list an override-only model; a per-run override does.
+    clear(sel); catalog.models.forEach(m => { if (perRun || !overrideOnly(m.id)) { const o = el('option', '', m.label || m.id); o.value = m.id; sel.appendChild(o); } });
     sel.value = value;
   }
   function effortSelect(sel, value) {
@@ -395,7 +397,7 @@
     const custom = el('option', '', t('profile.custom')); custom.value = ''; custom.disabled = true; sel.appendChild(custom);
     sel.value = value;
   }
-  const usageText = u => u && u.model ? `${u.model_used || u.model} · ${u.effort}` + (u.turns ? ` · ${u.turns} ${t('usage.turns')}` : '') + (u.seconds != null ? ` · ${u.seconds}s` : '') : '';
+  const usageText = u => u && u.model ? (u.override_only || overrideOnly(u.model) ? t('usage.fable') + ' · ' : '') + `${u.model_used || u.model} · ${u.effort}` + (u.turns ? ` · ${u.turns} ${t('usage.turns')}` : '') + (u.seconds != null ? ` · ${u.seconds}s` : '') : '';
 
   // --- roles (dialog, both modes) & project context (.uno/ in the repository) --------------
   let rolesData = { roles: [] };
@@ -426,7 +428,7 @@
     const tb = $('overrides').querySelector('tbody'); const prev = readOverrides(); clear(tb);
     const row = (key, label, model, effort) => {
       const tr = el('tr'); tr.dataset.key = key; tr.appendChild(el('td', '', label));
-      const ms = el('select', 'ov-model'); modelSelect(ms, (prev[key] || {}).model || model); tr.appendChild(el('td')).appendChild(ms);
+      const ms = el('select', 'ov-model'); modelSelect(ms, (prev[key] || {}).model || model, true); tr.appendChild(el('td')).appendChild(ms);
       const es = el('select', 'ov-effort'); effortSelect(es, (prev[key] || {}).effort || effort); tr.appendChild(el('td')).appendChild(es);
       tb.appendChild(tr);
     };
@@ -439,10 +441,29 @@
     $('overrides').querySelectorAll('tr').forEach(tr => { out[tr.dataset.key] = { model: tr.querySelector('.ov-model').value, effort: tr.querySelector('.ov-effort').value }; });
     return out;
   }
+  // Simple mode: one chip per role (and the orchestrator) switches that step to the
+  // override-only model for the next run only; the saved role never changes.
+  const special = new Set();
+  function renderSpecialChips() {
+    const box = $('specialChips'); clear(box);
+    const first = (catalog.override_only || [])[0]; if (!first) return;
+    [['*planner', t('chat.special.planner')], ...(rolesData.roles || []).map(r => [r.name, r.name])].forEach(([key, label]) => {
+      const b = el('button', 'ghost', label); b.type = 'button'; b.setAttribute('aria-pressed', String(special.has(key)));
+      b.addEventListener('click', () => { special.has(key) ? special.delete(key) : special.add(key); renderSpecialChips(); });
+      box.appendChild(b);
+    });
+  }
   function runSettings() {
-    const all = readOverrides(), planner = all['*planner']; delete all['*planner'];
+    const simple = document.body.classList.contains('simple'), first = (catalog.override_only || [])[0];
     const overrides = {};
-    (rolesData.roles || []).forEach(r => { const o = all[r.name]; if (o && (o.model !== r.model || o.effort !== r.effort)) overrides[r.name] = o; });
+    let planner;
+    if (simple) {
+      (rolesData.roles || []).forEach(r => { if (special.has(r.name) && first) overrides[r.name] = { model: first, effort: r.effort }; });
+      if (special.has('*planner') && first) planner = { model: first, effort: (statusData.planner || {}).effort };
+    } else {
+      const all = readOverrides(); planner = all['*planner']; delete all['*planner'];
+      (rolesData.roles || []).forEach(r => { const o = all[r.name]; if (o && (o.model !== r.model || o.effort !== r.effort)) overrides[r.name] = o; });
+    }
     return { overrides, planner: planner || undefined };
   }
   function renderRoles() {
@@ -467,7 +488,7 @@
       ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
       Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
     $('rolesOpen').disabled = !$('repo').value.trim();
-    renderOverrides();
+    renderOverrides(); renderSpecialChips();
     renderProjectState();
   }
   async function loadRoles() {
@@ -548,7 +569,7 @@
         const tr = el('tr');
         tr.appendChild(el('td', '', String(i + 1)));
         tr.appendChild(el('td', 'mono', s.id));
-        const roleTd = el('td', '', s.role); if (s.model) roleTd.appendChild(el('div', 'usage', usageText(s.usage && s.usage.model_used ? s.usage : { model: s.model, effort: s.effort }))); tr.appendChild(roleTd);
+        const roleTd = el('td', '', s.role); if (s.model) roleTd.appendChild(el('div', 'usage' + (s.override_only ? ' fable' : ''), usageText(s.usage && s.usage.model_used ? s.usage : { model: s.model, effort: s.effort, override_only: s.override_only }))); tr.appendChild(roleTd);
         tr.appendChild(el('td', 'goal', s.goal));
         tr.appendChild(el('td', 'mono', s.paths.join(' '))); tr.appendChild(el('td', 'mono', s.depends_on.join(', ') || '—'));
         const td = el('td'); td.appendChild(chip(s.status));
@@ -559,7 +580,9 @@
         tb.appendChild(tr);
       });
       $('planActions').hidden = st !== 'proposed';
-      $('maxNote').hidden = !plan.steps.some(s => s.profile === 'max');
+      const fable = (pipe.override_only_steps || []).length > 0 || pipe.planner_override_only;
+      $('maxNote').hidden = !fable && !plan.steps.some(s => s.profile === 'max');
+      $('maxNote').textContent = t(fable ? 'review.fableNote' : 'review.maxNote');
     }
     const review = st === 'review' || st === 'merged';
     $('pipeReview').hidden = !review;
@@ -597,7 +620,12 @@
   $('chatSend').addEventListener('click', send);
   $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); } });
   async function approvePlan() {
-    const r = await pipePost('/api/pipeline/approve');
+    const body = {};
+    if ((pipe.override_only_steps || []).length) {
+      if (!confirm(t('review.confirmFable'))) return;   // explicit, separate from the plan approval
+      body.confirm_override_only = true;
+    }
+    const r = await pipePost('/api/pipeline/approve', body);
     if (!r) return;
     running = true; pipelineLive = true; $('results').hidden = true; resetStage();
     stream(r.offset);

@@ -117,7 +117,7 @@ class Task:
         self.model = default[0] if self.model is None else self.model
         self.effort = default[1] if self.effort is None else self.effort
         try:
-            models.check(self.model, self.effort)
+            models.check(self.model, self.effort, override=True)   # a task is one run: the override may be set here
         except ValueError as exc:
             raise ValueError(f"task {self.name!r}: {exc}") from exc
         if self.preset not in PRESETS:
@@ -169,13 +169,15 @@ class Worker:
         """What ran, for the bus and the results: requested model/effort, the model the CLI
         reported, turns and wall-clock seconds."""
         return {"model": self.task.model, "effort": self.task.effort, "model_used": self.model_used,
-                "turns": self.turns, "seconds": self.seconds}
+                "turns": self.turns, "seconds": self.seconds,
+                "override_only": models.is_override_only(self.task.model)}   # e.g. fable: marked in every event
 
     async def run(self):
         self.status = "running"
         started = time.monotonic()
         self.bus.emit(self.name, "start", self.task.prompt[:120], target="orchestrator",
-                      branch=self.branch, model=self.task.model, effort=self.task.effort)
+                      branch=self.branch, model=self.task.model, effort=self.task.effort,
+                      override_only=models.is_override_only(self.task.model))
         try:
             backend = self._run_mock() if self.backend == "mock" else self._run_claude()
             await asyncio.wait_for(backend, self.timeout)
@@ -197,7 +199,7 @@ class Worker:
 
     def _model_error(self):
         return RuntimeError(f"model {self.task.model!r} is not available with this login (the CLI "
-                            f"rejected it); nothing ran. Choose one of {models.MODELS} for this role.")
+                            f"rejected it); nothing ran. Choose one of {models.SAVEABLE} for this role.")
 
     async def _run_mock(self):
         import random

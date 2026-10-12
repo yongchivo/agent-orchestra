@@ -14,16 +14,28 @@ FULL_NAMES = {m["id"]: m["full"] for m in _DATA["models"]}
 EFFORTS = list(_DATA["efforts"])
 PROFILES = {name: (p["model"], p["effort"]) for name, p in _DATA["profiles"].items()}
 ROLE_DEFAULTS = dict(_DATA["role_defaults"])
+# Usable only as a per-run override chosen in the UI: never saved in a role, a template or the
+# settings, never a default, never reached by a fallback or a retry.
+OVERRIDE_ONLY = list(_DATA.get("override_only", []))
+SAVEABLE = [m for m in MODELS if m not in OVERRIDE_ONLY]
 for _name, (_m, _e) in PROFILES.items():
-    assert _m in MODELS and _e in EFFORTS, f"models.json: profile {_name} uses an unlisted model or effort"
+    assert _m in SAVEABLE and _e in EFFORTS, f"models.json: profile {_name} uses an unlisted or override-only model"
 
 
-def check(model, effort):
-    """Raise ValueError unless both are in the allowlist (an enum, not free text)."""
+def check(model, effort, override=False):
+    """Raise ValueError unless both are in the allowlist (an enum, not free text). Override-only
+    models pass only when `override` is True: the one place is a per-run choice in the UI."""
     if model not in MODELS:
         raise ValueError(f"unknown model {model!r}: use one of {MODELS}")
+    if model in OVERRIDE_ONLY and not override:
+        raise ValueError(f"model {model!r} cannot be saved or used by default: choose it only for one run, "
+                         f"from the page; use one of {SAVEABLE} here")
     if effort not in EFFORTS:
         raise ValueError(f"unknown effort {effort!r}: use one of {EFFORTS}")
+
+
+def is_override_only(model):
+    return model in OVERRIDE_ONLY
 
 
 def default_for(name):
@@ -40,4 +52,4 @@ def catalog():
     """What the page needs to build its selects; data only."""
     return {"cli_verified": CLI_VERIFIED, "models": _DATA["models"], "efforts": EFFORTS,
             "profiles": {n: {"model": m, "effort": e} for n, (m, e) in PROFILES.items()},
-            "role_defaults": ROLE_DEFAULTS}
+            "role_defaults": ROLE_DEFAULTS, "override_only": OVERRIDE_ONLY}

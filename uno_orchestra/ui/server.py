@@ -241,7 +241,7 @@ class Chat:
         if not isinstance(planner, dict) or set(planner) - {"model", "effort"}:
             raise ValueError("planner: only 'model' and 'effort' are allowed")
         planner = (planner.get("model", cfg["planner_model"]), planner.get("effort", cfg["planner_effort"]))
-        models.check(*planner)
+        models.check(*planner, override=True)   # chosen for this request only; config.py never accepts fable
         self.__init__(self.srv)
         self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
         self.roles, self.project_context, self.fingerprint = roles, context, fp
@@ -278,11 +278,15 @@ class Chat:
         self.state = "review" if self.branch else "idle"
 
     # -- controls
-    def approve(self):
+    def approve(self, body=None):
         if self.state != "proposed":
             return 409, {"error": "there is no plan waiting for approval"}
         if self.srv.running():
             return 409, {"error": "a run is already in progress"}
+        special = pipeline.uses_override_only(self.plan[1])
+        if special and not ((body or {}).get("confirm_override_only") is True):
+            return 409, {"error": "this plan uses Fable (billed outside your normal limit): confirm it explicitly",
+                         "code": "confirm_override_only", "steps": special}
         # .uno/ may have changed on disk since the roles were loaded: the run uses the
         # loaded roles, so it must still be exactly the confirmed snapshot.
         if (roles_mod.fingerprint(self.repo) != self.fingerprint
@@ -405,6 +409,9 @@ class Chat:
                           "duration": pipeline.MAX_DURATION}}
         if self.engine:
             out["iterations"] = self.engine.iterations
+        if self.plan:
+            out["override_only_steps"] = pipeline.uses_override_only(self.engine.steps if self.engine else self.plan[1])
+            out["planner_override_only"] = models.is_override_only(self.planner[0]) if self.planner else False
         if self.state in ("review", "merged") and self.branch:
             out["diff"] = pipeline.consolidated_diff(self.repo, self.base, self.branch, MAX_DIFF)
             out["pending_findings"] = (self.result or {}).get("pending_findings", [])
@@ -584,6 +591,7 @@ class UIServer(ThreadingHTTPServer):
             ended = next((e for e in reversed(events) if e.get("source") == t.name and e["kind"] in ("done", "failed")), {})
             usage = {k: ended.get(k) for k in ("model", "effort", "model_used", "turns", "seconds")}
             usage["model"], usage["effort"] = t.model, t.effort
+            usage["override_only"] = models.is_override_only(t.model)
             branch = f"agent/{run_id}/{t.name}" if run_id else None
             diff, commands = "", []
             if branch and worktree.git(repo, "rev-parse", "--verify", "-q", branch, check=False).returncode == 0:
@@ -606,6 +614,8 @@ class UIServer(ThreadingHTTPServer):
         if not isinstance(name, str) or not NAME_RE.match(name):
             raise ValueError("invalid template name: use a-z, 0-9 and '-'")
         tasks = parse_tasks(body.get("tasks"))
+        for t in tasks:
+            models.check(t.model, t.effort)   # a saved template is not "one run": override-only models are refused
         backend = body.get("backend", "mock")
         if backend not in BACKENDS:
             raise ValueError("invalid backend")
@@ -927,7 +937,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(*srv.chat.message(body))
             if path.startswith("/api/pipeline/"):
                 action = path[len("/api/pipeline/"):]
-                if action in ("approve", "pause", "resume", "cancel", "merge", "discard"):
+                if action == "approve":
+                    with srv.lock:
+                        return self._json(*srv.chat.approve(body))
+                if action in ("pause", "resume", "cancel", "merge", "discard"):
                     with srv.lock:
                         return self._json(*getattr(srv.chat, action)())
         except (ValueError, RuntimeError) as exc:

@@ -214,3 +214,8 @@ dialog label { width: 100%; } dialog .row label { width: auto; }
 #overrides td:first-child { color: var(--dim); font-family: var(--mono); }
 #overrides select { padding: 3px 6px; font-size: 12px; }
 .usage { color: var(--dim); font-size: 11px; font-family: var(--mono); }
+.chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.chips button { padding: 2px 9px; font-size: 11px; border-radius: 999px; letter-spacing: .04em; }
+.chips button[aria-pressed="true"] { background: var(--grad); color: var(--bg); border-color: transparent; font-weight: 700; }
+.special { margin-top: 4px; }
+.fable { color: var(--magenta); font-weight: 700; }

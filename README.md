@@ -239,12 +239,24 @@ and profiles; edit it when the CLI or your subscription changes (it was verified
 Claude Code 2.1.296, whose flags are `--model <alias|full name>` and `--effort
 low|medium|high|xhigh|max`, and against the account login: `fable`, `opus`, `sonnet`,
 `haiku`). Each role has its own `model` and `effort`; the planner's are `uno config set
-planner_model …` / `planner_effort …`. In simple mode the role editor offers three profiles
-(⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = fable/max; defaults: planner and
-`security-analyst` Max, `architect` and `developer` Balanced, `tester` Fast). Advanced mode
-sets the exact pair per role and, next to the chat, an override for the next run only
-(nothing is written to the role). A note next to Approve warns when the plan uses Max
-profiles, which eat more of the subscription's limit. Every `start` event and every result
+planner_model …` / `planner_effort …`. **Opus is the maximum** for every
+role, agent and the planner. In simple mode the role editor offers three profiles
+(⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = opus/max; defaults: planner
+Balanced, `security-analyst` Max, `architect` and `developer` Balanced, `tester` Fast).
+Advanced mode sets the exact pair per role and, next to the chat, an override for the next
+run only (nothing is written to the role). A note next to Approve warns when the plan uses
+Max profiles, which eat more of the subscription's limit.
+
+**Fable only when you choose it, per run.** `fable` is `override_only` in `models.json`: it is
+never a default (roles, planner, templates, `uno init`), a saved role or template with
+`model: fable` fails the schema (a repository file that carries it is reported as invalid and
+not loaded), the settings refuse it, and the planner's own output never picks a model (a
+`model` in a plan step is ignored; the code assigns each step's pair from the role and your
+overrides). It exists only as a per-run override in the UI: the "Fable for this run only"
+chips in simple mode, the override table in advanced. Approving a plan that uses it asks a
+separate confirmation ("This plan uses Fable, billed outside your normal limit. Continue?"),
+which the server enforces (`confirm_override_only: true`). No fallback or retry can switch
+to it, and every event and result marks when it was used. Every `start` event and every result
 records the model and effort requested, the model the CLI actually reported, the turns and
 the seconds, so runs can be compared. A model the CLI rejects is a clear error with the
 alternatives, never a silent switch. Model and effort only ever come from the allowlist and
@@ -323,6 +335,7 @@ paste; the UI never pushes or runs `gh`.
 | A brand file that is not an image, too big, or outside the brand directory | fixed routes to fixed names, PNG signature, 1 MiB cap, regular file inside the directory, `image/png` + `nosniff`, 404 otherwise | `test_brand_pngs_are_served_only_from_the_allowlist`, `test_svg_or_oversized_brand_file_is_refused`, `test_without_a_brand_directory_the_ui_is_neutral` |
 | HTML in a translation, or the mode loosening a rule | dictionaries rendered with `textContent`; the mode is a CSS class, the server validates the same fields and limits | `test_i18n_dictionaries_are_static_and_rendered_as_text`, `test_simple_mode_is_a_css_class_and_changes_no_permission_or_limit` |
 | A role renamed or deleted under a running plan, too many roles, a tampered personal template | the server refuses while a plan using the role is proposed or running; 12 roles per project in the core; templates pass the same strict schema, invalid ones are skipped; built-ins cannot be deleted | `test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted`, `test_role_rename_duplicate_limit_and_protected_paths`, `test_personal_template_library` (`tests/test_pipeline.py`) |
+| Fable saved somewhere, used by default, or chosen by the model | `override_only` in `models.json`: the schema rejects it in roles, templates, run templates and settings; the planner's output cannot pick a model; approval needs an explicit flag | `test_fable_cannot_be_saved_in_a_role_a_repo_file_or_a_template`, `test_plan_without_override_never_uses_fable_and_fable_override_needs_confirmation`, `test_planner_output_never_chooses_a_model` |
 | Argument injection through the model or effort, or a silent model switch | both are an enum from `models.json`, validated in `Task`, `Role`, the overrides and the planner, passed as separate argv elements; a CLI rejection is reported as such | `test_model_and_effort_only_from_the_allowlist`, `test_run_override_leaves_the_role_untouched_and_is_recorded`, `test_unavailable_model_is_a_clear_error` (`tests/test_pipeline.py`) |
 | Token persisted by the page, or a weaker CSP | `localStorage` holds language, mode and project only; the CSP is asserted byte for byte | `test_localstorage_never_holds_the_token`, `test_csp_is_unchanged_or_stricter` |
 
