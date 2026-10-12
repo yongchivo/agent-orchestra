@@ -62,17 +62,27 @@ BEFORE="$(fingerprint)"
 for m in GET HEAD; do
   for p in /api/start /api/stop /api/branch /api/check "/api/start?repo=/tmp/x" "/api/branch?repo=/tmp/x&name=evil" \
            /api/chat "/api/chat?repo=/tmp/x&message=hi" /api/pipeline/approve /api/pipeline/merge /api/roles/delete "/api/roles/commit?repo=/tmp/x" \
-           "/api/roles/rename?repo=/tmp/x&name=a&new_name=b" "/api/roles/from-template?repo=/tmp/x&template=developer" "/api/role-templates/delete?name=developer"; do
+           "/api/roles/rename?repo=/tmp/x&name=a&new_name=b" "/api/roles/from-template?repo=/tmp/x&template=developer" "/api/role-templates/delete?name=developer" \
+           /api/prompts/generate /api/prompts/clarify "/api/prompts/send?text=hi&repo=/tmp/x" /api/prompts/lint "/api/prompts/library/delete?name=x" \
+           /api/prompts/templates "/api/prompts/templates/delete?name=fix" /api/prompts/diff; do
     if [ "$m" = HEAD ]; then c="$(code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; else c="$(code -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; fi
     check "$m $p is not an action -> 404" 404 "$c"
   done
   for p in / /app.js /style.css /i18n/es.json /i18n/en.json /brand/lockup.png /brand/mark.png /brand/favicon.png /brand/apple-touch.png \
-           /api/status /api/results /api/templates /api/role-templates "/api/events?from=0" /api/pipeline "/api/roles?repo=/tmp/x"; do
+           /api/status /api/results /api/templates /api/role-templates "/api/events?from=0" /api/pipeline "/api/roles?repo=/tmp/x" \
+           /api/prompts "/api/prompts/library?q=x" "/api/prompts/library?name=nope"; do
     if [ "$m" = HEAD ]; then code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; else curl -s -m 3 -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; fi
   done
 done
 check "state dir unchanged after GET/HEAD sweep"    "$BEFORE" "$(fingerprint)"
 check "token file is 0600"                          600 "$(stat -f '%Lp' "$STATE_DIR/token" 2>/dev/null || stat -c '%a' "$STATE_DIR/token")"
+check "POST /api/prompts/lint without token -> 401"   401 "$(code -X POST -H "Origin: $ORIGIN" -H "Content-Type: application/json" -d '{"text":"x"}' "$BASE/api/prompts/lint")"
+check "POST /api/prompts/generate with fable, no confirmation -> 409" 409 "$(code -X POST -H "X-Orchestra-Token: $TOKEN" -H "Origin: $ORIGIN" -H "Content-Type: application/json" -d '{"idea":"x","model":"fable","effort":"max","backend":"mock"}' "$BASE/api/prompts/generate")"
+check "POST /api/prompts/send with a secret -> 400"  400 "$(code -X POST -H "X-Orchestra-Token: $TOKEN" -H "Origin: $ORIGIN" -H "Content-Type: application/json" -d '{"text":"OBJETIVO\nsk-abcdefghijklmnopqrstuvwxyz","repo":"/tmp/x","backend":"mock"}' "$BASE/api/prompts/send")"
+if [ -d "$STATE_DIR/prompts" ]; then
+  check "prompt library directory is 0700"          700 "$(stat -f '%Lp' "$STATE_DIR/prompts" 2>/dev/null || stat -c '%a' "$STATE_DIR/prompts")"
+  check "prompt library files are 0600"             ""  "$(find "$STATE_DIR/prompts" -type f ! -perm 0600 2>/dev/null)"
+fi
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "all checks passed"; else echo "$FAILS check(s) FAILED"; fi

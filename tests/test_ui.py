@@ -453,7 +453,7 @@ def brand_dir(ui):
 
 def test_without_a_brand_directory_the_ui_is_neutral(ui):
     _, status, _ = call(ui, "GET", "/api/status")
-    assert status["brand"] is False and status["version"] == "0.2.0"
+    assert status["brand"] is False and status["version"] == "0.3.0"
     for route in ("/brand/lockup.png", "/brand/mark.png", "/brand/favicon.png", "/brand/apple-touch.png"):
         assert call(ui, "GET", route)[0] == 404, route
     html = (ROOT / "uno_orchestra" / "ui" / "index.html").read_text()

@@ -206,15 +206,16 @@ def planner_system_prompt(roles, project_context, max_steps=MAX_STEPS):
     return "\n".join(lines)
 
 
-def planner_command(request, system, max_turns=3, env=None, auth="account", model=None, effort=None):
-    """Claude with no tools at all, structured JSON output, nothing from the repository."""
+def planner_command(request, system, max_turns=3, env=None, auth="account", model=None, effort=None, schema=PLAN_SCHEMA):
+    """Claude with no tools at all, structured JSON output, nothing from the repository.
+    The Prompt Studio generator is the same command with its own schema."""
     env = agent_env(auth=auth) if env is None else env
     default = models.default_for("planner")
     model = default[0] if model is None else model   # only None means "default": "" is rejected below
     effort = default[1] if effort is None else effort
     models.check(model, effort, override=True)       # the per-request choice may be fable; the settings cannot
     cmd = ["claude", "-p", request, "--output-format", "json", "--model", model, "--effort", effort,
-           "--json-schema", json.dumps(PLAN_SCHEMA), "--system-prompt", system,
+           "--json-schema", json.dumps(schema), "--system-prompt", system,
            "--tools", "", "--allowedTools", "", "--disallowedTools", "Bash,WebFetch,WebSearch,mcp__*",
            "--restricted", "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
            "--permission-mode", "dontAsk", "--permission-prompts", "none",
@@ -279,10 +280,14 @@ def propose(request, roles, project_context, backend="claude", transcript=(), hi
         return {"summary": f"mock plan: {' -> '.join(order)}", "steps": steps}
     system = planner_system_prompt(roles, project_context)
     prompt = planner_prompt(request, transcript, history, rejected)
+    return ask_json(planner_command(prompt, system, auth=auth, model=model, effort=effort), cwd=cwd, auth=auth)
+
+
+def ask_json(cmd, cwd=None, auth="account", timeout=PLANNER_TIMEOUT):
+    """Run one no-tools CLI command and return its structured output (or the JSON in its result)."""
     try:
-        r = subprocess.run(planner_command(prompt, system, auth=auth, model=model, effort=effort), env=agent_env(auth=auth), cwd=cwd,
-                           capture_output=True, text=True, timeout=PLANNER_TIMEOUT, check=False,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(cmd, env=agent_env(auth=auth), cwd=cwd, capture_output=True, text=True,
+                           timeout=timeout, check=False, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PlanError(f"planner failed: {exc}") from exc
     if r.returncode != 0:

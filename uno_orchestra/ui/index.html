@@ -35,6 +35,9 @@
   <input id="repo" data-adv list="recent" data-i18n-placeholder="repo.placeholder" autocomplete="off" spellcheck="false">
   <datalist id="recent"></datalist>
   <button id="rolesOpen" type="button" class="ghost" data-i18n="roles.button" disabled>Roles</button>
+  <div class="seg" id="tabSeg" role="tablist" aria-label="section">
+    <button type="button" role="tab" data-tab="orchestra" data-i18n="tab.orchestra">Orquestador</button><button type="button" role="tab" data-tab="prompts" data-i18n="tab.prompts">Prompts</button>
+  </div>
   <div class="switches">
     <div class="seg" id="langSeg" role="group" aria-label="language">
       <button type="button" data-lang="es">ES</button><button type="button" data-lang="en">EN</button>
@@ -192,6 +195,108 @@
         <span class="hint" data-i18n="adv.publish.hint"></span>
       </div>
     </section>
+  </section>
+</main>
+
+<main id="studio" hidden>
+  <section id="studioIn" class="panel">
+    <h2><span data-i18n="ps.title">Prompt Studio</span> <span id="psState" class="hint"></span></h2>
+    <p class="hint" data-i18n="ps.hint"></p>
+    <div class="chips modes" id="psModes" role="group"></div>
+    <textarea id="ps-idea" rows="3" data-i18n-placeholder="ps.idea" maxlength="2000"></textarea>
+    <div id="psUserPrompt" hidden>
+      <label><span data-i18n="ps.prompt">tu prompt</span> <textarea id="ps-prompt" rows="8" maxlength="12000"></textarea></label>
+      <label id="psChangesLabel"><span data-i18n="ps.changes">cambios que pides</span> <textarea id="ps-changes" rows="2" maxlength="2000"></textarea></label>
+    </div>
+    <div class="row knobs" data-adv>
+      <label><span data-i18n="ps.kind">tipo</span> <input id="ps-kind" maxlength="500" data-i18n-placeholder="ps.kind.ph"></label>
+      <label class="grow"><span data-i18n="ps.goal">objetivo</span> <input id="ps-goal" maxlength="500"></label>
+    </div>
+    <div class="row knobs" data-adv>
+      <label><span data-i18n="ps.stack">stack</span> <input id="ps-stack" maxlength="500"></label>
+      <label class="grow"><span data-i18n="ps.avoid">qué no tocar</span> <input id="ps-avoid" maxlength="500"></label>
+    </div>
+    <div class="row knobs" data-adv>
+      <label><span data-i18n="ps.detail">detalle</span>
+        <select id="ps-detail"><option value="brief" data-i18n="ps.detail.brief">breve</option><option value="standard" selected data-i18n="ps.detail.standard">estándar</option><option value="exhaustive" data-i18n="ps.detail.exhaustive">exhaustivo</option></select>
+      </label>
+      <label><span data-i18n="ps.lang">idioma de salida</span> <select id="ps-lang"><option value="es">ES</option><option value="en">EN</option></select></label>
+      <label><span data-i18n="ps.template">plantilla</span> <select id="ps-template"></select></label>
+      <label><span data-i18n="roles.model">modelo</span> <select id="ps-model"></select></label>
+      <label><span data-i18n="roles.effort">esfuerzo</span> <select id="ps-effort"></select></label>
+    </div>
+    <div class="row knobs" data-simple>
+      <label><span data-i18n="roles.profile">potencia</span> <select id="ps-profile"></select></label>
+      <span class="hint" data-i18n="ps.special">Fable solo en esta generación:</span>
+      <button id="psFable" type="button" class="ghost chip-btn" aria-pressed="false">Fable</button>
+    </div>
+    <div class="row actions">
+      <button id="psGenerate" type="button" class="primary" data-i18n="ps.generate">Generar</button>
+      <span id="psContext" class="hint"></span>
+    </div>
+    <ul id="psErrors" class="errors"></ul>
+    <div id="psQuestions" class="questions" hidden>
+      <h3 data-i18n="ps.questions">Antes de escribirlo, dime</h3>
+      <div id="psQList"></div>
+      <div class="row actions">
+        <button id="psAnswer" type="button" class="primary" data-i18n="ps.continue">Continuar</button>
+        <button id="psSkip" type="button" class="ghost" data-i18n="ps.skipAll">Saltar todas</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="studioOut" class="panel">
+    <h2><span data-i18n="ps.result">Prompt</span> <span id="psScore" class="badge zero">—</span> <span id="psMeta" class="hint"></span></h2>
+    <div id="psEmpty" class="empty" data-i18n="ps.empty">Escribe una idea y pulsa Generar</div>
+    <div id="psResult" hidden>
+      <ul id="psLint" class="warnings"></ul>
+      <div id="psReview" class="trust" hidden><b id="psGrade"></b><ul id="psProblems" class="warnings"></ul></div>
+      <textarea id="psText" rows="22" spellcheck="false"></textarea>
+      <div class="row lists">
+        <div class="grow"><h4 data-i18n="ps.assumptions">Suposiciones</h4><ul id="psAssumptions" class="plain"></ul></div>
+        <div class="grow"><h4 data-i18n="ps.open">Preguntas abiertas</h4><ul id="psOpen" class="plain"></ul></div>
+      </div>
+      <div id="psRoles" class="pstate err" hidden><span id="psRolesText"></span><button id="psRolesOpen" type="button" class="ghost small" data-i18n="ps.roles.open">Abrir gestor de roles</button></div>
+      <details id="psDiffBox" hidden><summary data-i18n="ps.diff">Diferencias con tu prompt</summary><div id="psDiff"></div></details>
+      <div class="row actions">
+        <button id="psCopy" type="button" class="ghost" data-i18n="ps.copy">Copiar</button>
+        <input id="psName" data-i18n-placeholder="ps.name" autocomplete="off" spellcheck="false">
+        <input id="psTags" data-i18n-placeholder="ps.tags" autocomplete="off" spellcheck="false">
+        <button id="psSave" type="button" class="ghost" data-i18n="ps.save">Guardar en la biblioteca</button>
+        <button id="psSend" type="button" class="primary" data-i18n="ps.send">Enviar al orquestador</button>
+      </div>
+      <p class="hint" data-i18n="ps.send.hint"></p>
+    </div>
+  </section>
+
+  <section id="studioLib" class="panel">
+    <h2><span data-i18n="ps.library">Biblioteca</span> <span id="psLibCount" class="hint"></span></h2>
+    <div class="row">
+      <input id="psSearch" class="grow" data-i18n-placeholder="ps.search" autocomplete="off" maxlength="200">
+      <select id="psLibMode"><option value="" data-i18n="ps.anyMode">cualquier modo</option></select>
+    </div>
+    <div id="psLibList" class="lib"></div>
+    <div class="row">
+      <label><span data-i18n="ps.compare">comparar versiones</span> <select id="psCmpA"></select></label>
+      <select id="psCmpB"></select>
+      <button id="psCompare" type="button" class="ghost" data-i18n="ps.compare.go">Comparar</button>
+    </div>
+    <div id="psCmpDiff"></div>
+  </section>
+
+  <section id="studioTpl" class="panel" data-adv>
+    <h2><span data-i18n="ps.templates">Plantillas</span> <span id="psTplState" class="hint"></span></h2>
+    <p class="hint" data-i18n="ps.templates.hint"></p>
+    <div class="row">
+      <label><span data-i18n="ps.template">plantilla</span> <select id="psTplList"></select></label>
+      <label><span data-i18n="ps.tpl.name">nombre</span> <input id="psTplName" autocomplete="off" spellcheck="false"></label>
+      <label><span data-i18n="ps.tpl.mode">modo</span> <select id="psTplMode"></select></label>
+    </div>
+    <label><span data-i18n="ps.tpl.instructions">instrucciones para el generador</span> <textarea id="psTplText" rows="6" maxlength="4000"></textarea></label>
+    <div class="row actions">
+      <button id="psTplSave" type="button" class="ghost" data-i18n="ps.tpl.save">Guardar (nueva versión)</button>
+      <button id="psTplDelete" type="button" class="ghost" data-i18n="ps.tpl.delete">Eliminar mis versiones</button>
+    </div>
   </section>
 </main>
 
