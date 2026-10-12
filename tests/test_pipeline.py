@@ -174,6 +174,7 @@ def test_mock_chain_hands_artifacts_as_labelled_untrusted_data(repo, roles, tmp_
         Worker._run_mock = original
     assert {s["id"]: s["status"] for s in res["steps"]} == {"dev": "done", "sec": "done", "arch": "done"}
     assert res["iterations"] == 1 and res["pending_findings"] == []    # one loop, then clean
+    assert res["ready_to_merge"] is True and res["review_failures"] == []
     sec = prompts["sec"][0]
     assert pipeline.ARTIFACT_BEGIN in sec and pipeline.ARTIFACT_END in sec and "type diff" in sec
     assert pipeline.ARTIFACT_NOTICE in sec and "diff --git a/dev.txt" in sec
@@ -242,6 +243,7 @@ def test_correction_loop_stops_at_the_limit_and_asks(repo, roles, tmp_path):
                 if p.question:
                     break
             assert p.status == "question" and questions and "correction limit" in questions[0]
+            assert "Resume button" in questions[0] and "Cancel button" in questions[0]
             rounds_at_question = p.iterations
             p.resume()                      # the user decides: continue with the findings pending
             res = await task
@@ -256,6 +258,74 @@ def test_correction_loop_stops_at_the_limit_and_asks(repo, roles, tmp_path):
     assert kinds.count("iteration") == 2 and "question" in kinds
     with pytest.raises(ValueError, match="max_iterations"):
         Pipeline(repo, roles, steps, EventBus(events), max_iterations=pipeline.MAX_ITERATIONS + 1)
+
+
+def test_finding_kind_defaults_to_defect_and_is_strict():
+    base = {"severity": "medium", "file": "a.py", "description": "d", "recommendation": "r"}
+    assert pipeline.parse_findings({"findings": [base]})[0]["kind"] == "defect"
+    ev = pipeline.parse_findings([dict(base, kind="evidence")])
+    assert ev[0]["kind"] == "evidence" and pipeline.severe(ev) == [] and pipeline.evidence(ev) == ev
+    for bad in ("bug", "", None, 1, "Evidence"):
+        with pytest.raises(PlanError, match="kind"):
+            pipeline.parse_findings([dict(base, kind=bad)])
+    from uno_orchestra.worker import FINDINGS_SCHEMA
+    item = FINDINGS_SCHEMA["properties"]["findings"]["items"]
+    assert item["properties"]["kind"]["enum"] == ["defect", "evidence"] and "kind" not in item["required"]
+    assert '"evidence" only when' in roles_mod.FINDINGS_FORMAT
+
+
+def _mock_reviewers(findings_for):
+    """Patch the mock so a reviewer returns findings_for(step name, round)."""
+    original = Worker._run_mock
+    prompts = {}
+
+    async def fake(self):
+        prompts.setdefault(self.name, []).append(self.task.prompt)
+        if self.task.output == "findings":
+            self.output = findings_for(self.name, self.round)
+            return
+        await original(self)
+    return fake, prompts
+
+
+EVIDENCE = {"severity": "high", "kind": "evidence", "file": "dev.txt", "line": 0,
+            "description": "no execution evidence supplied", "recommendation": "run the tests"}
+
+
+def test_evidence_findings_never_start_a_round_or_ask_but_block_merge(repo, roles, tmp_path, monkeypatch):
+    defect = {"severity": "medium", "file": "dev.txt", "description": "unvalidated input", "recommendation": "validate"}
+    # sec only ever reports missing evidence; arch reports a defect on the first round only.
+    fake, prompts = _mock_reviewers(lambda name, rnd: {"findings": [EVIDENCE] if name == "sec"
+                                                       else ([defect] if rnd == 1 else [])})
+    monkeypatch.setattr(Worker, "_run_mock", fake)
+    monkeypatch.setattr(pipeline, "MAX_DURATION", 60)    # a wrongly raised question fails, not hangs
+    questions = []
+    p, res = run_pipeline(repo, roles, CHAIN, tmp_path / "e.jsonl", max_iterations=1, on_question=questions.append)
+    assert res["iterations"] == 1 and not questions and p.question is None     # the defect: one round
+    dev2 = prompts["dev"][1]
+    assert "unvalidated input" in dev2 and "no execution evidence" not in dev2  # evidence not sent back
+    kinds = [e["kind"] for e in events_of(tmp_path / "e.jsonl")]
+    assert kinds.count("iteration") == 1 and "question" not in kinds
+    # The evidence finding stays visible and the result is not ready to merge.
+    assert [f["kind"] for f in res["pending_findings"]] == ["evidence"]
+    assert res["pending_findings"][0]["severity"] == "high" and res["ready_to_merge"] is False
+
+    # Evidence alone: no correction round at all, no question.
+    fake, prompts = _mock_reviewers(lambda name, rnd: {"findings": [EVIDENCE]})
+    monkeypatch.setattr(Worker, "_run_mock", fake)
+    p, res = run_pipeline(repo, roles, CHAIN, tmp_path / "e2.jsonl", max_iterations=1, on_question=questions.append)
+    assert res["iterations"] == 0 and not questions and len(prompts["dev"]) == 1
+    assert len(pipeline.evidence(res["pending_findings"])) == 2 and res["ready_to_merge"] is False
+
+
+def test_failed_reviewer_is_reported_and_blocks_merge(repo, roles, tmp_path, monkeypatch):
+    fake, _ = _mock_reviewers(lambda name, rnd: {"findings": [{"severity": "critical"}]} if name == "sec"
+                              else {"findings": []})
+    monkeypatch.setattr(Worker, "_run_mock", fake)
+    p, res = run_pipeline(repo, roles, CHAIN, tmp_path / "e.jsonl")
+    assert res["pending_findings"] == [] and res["ready_to_merge"] is False
+    [fail] = res["review_failures"]
+    assert fail["step"] == "sec" and fail["status"] == "failed" and "malformed findings" in fail["detail"]
 
 
 def test_agent_changing_orchestra_dir_is_blocked(repo, roles, tmp_path):
@@ -453,6 +523,28 @@ def test_chat_flow_plan_approve_review_merge(ui, repo):
     assert git(repo, "rev-parse", "HEAD") != before
     assert call(ui, "POST", "/api/pipeline/merge")[0] == 409
     assert call(ui, "POST", "/api/pipeline/discard")[1]["state"] == "idle"
+
+
+def test_review_panel_reports_failed_reviews_and_validation_pending(ui, repo, monkeypatch):
+    fake, _ = _mock_reviewers(lambda name, rnd: "not json" if name == "security-analyst" else {"findings": [EVIDENCE]})
+    monkeypatch.setattr(Worker, "_run_mock", fake)
+    assert chat(ui, repo, "add a feature")[0] == 200 and wait_state(ui, "proposed")
+    assert call(ui, "POST", "/api/pipeline/approve")[0] == 200 and wait_state(ui, "review")
+    _, snap = call(ui, "GET", "/api/pipeline")
+    assert snap["ready_to_merge"] is False and snap["iterations"] == 0
+    assert [(f["step"], f["status"]) for f in snap["review_failures"]] == [("security-analyst", "failed")]
+    assert [f["kind"] for f in snap["pending_findings"]] == ["evidence"]
+    last = snap["transcript"][-1]["text"]
+    assert "1 awaiting validation" in last and "Review security-analyst did not finish: malformed findings" in last
+    # The page: "No pending findings" only without failures and findings; evidence has its own section.
+    js = (Path(pipeline.__file__).parent / "ui" / "app.js").read_text()
+    assert "if (!findings.length && !failures.length) ul.appendChild(el('li', 'none', t('review.findings.none')))" in js
+    assert "'review.failed'" in js and "$('validationBox').hidden = !evidence.length" in js
+    for lang in ("en", "es"):
+        d = json.loads((Path(pipeline.__file__).parent / "ui" / "i18n" / f"{lang}.json").read_text())
+        assert {"review.validation", "review.failed", "review.ready", "review.notReady"} <= set(d)
+    assert json.loads((Path(pipeline.__file__).parent / "ui" / "i18n" / "en.json").read_text())[
+        "review.validation"] == "Validation pending"
 
 
 def test_chat_pause_resume_cancel_and_redirect(ui, repo, monkeypatch):

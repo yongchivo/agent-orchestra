@@ -109,9 +109,15 @@
       <p class="hint" data-i18n="review.result.hint"></p>
       <h4 data-i18n="review.findings">Hallazgos de los revisores</h4>
       <ul id="pendingFindings" class="findings"></ul>
+      <div id="validationBox" hidden>
+        <h4 data-i18n="review.validation">Validación pendiente</h4>
+        <p class="hint" data-i18n="review.validation.hint"></p>
+        <ul id="validationFindings" class="findings"></ul>
+      </div>
       <h4 data-i18n="review.diff">Cambios</h4>
       <div id="pipeDiff"></div>
       <pre id="pipeCmds" data-adv></pre>
+      <p id="mergeReady" class="hint"></p>
       <div class="row actions">
         <button id="pMerge" type="button" class="ok" data-i18n="review.merge">Aprobar y fusionar en mi rama</button>
         <button id="pDiscard" type="button" class="ghost" data-i18n="review.discard">Rechazar (cerrar; la rama se conserva)</button>

@@ -558,6 +558,8 @@
     $('pPause').disabled = st !== 'running';
     $('pResume').disabled = !(st === 'paused' || st === 'question');
     $('pCancel').disabled = !['running', 'paused', 'question'].includes(st);
+    // A pending question is answered with these two buttons, not by typing in the chat.
+    ['pResume', 'pCancel'].forEach(id => { $(id).classList.toggle('primary', st === 'question'); $(id).classList.toggle('ghost', st !== 'question'); });
     $('chatSend').disabled = st === 'planning';
 
     const plan = pipe.plan;
@@ -588,10 +590,20 @@
     $('pipeReview').hidden = !review;
     if (review) {
       const ul = $('pendingFindings'); clear(ul);
-      const findings = pipe.pending_findings || [];
-      if (!findings.length) ul.appendChild(el('li', 'none', t('review.findings.none')));
-      findings.forEach(f => ul.appendChild(el('li', 'sev-' + String(f.severity || '').toLowerCase(),
-        `[${f.severity}] ${f.step} (${f.role}): ${f.file}${f.line ? ':' + f.line : ''} — ${f.description} → ${f.recommendation}`)));
+      const findings = pipe.pending_findings || [], failures = pipe.review_failures || [];
+      const evidence = findings.filter(f => f.kind === 'evidence'), defects = findings.filter(f => f.kind !== 'evidence');
+      const item = f => el('li', 'sev-' + String(f.severity || '').toLowerCase(),
+        `[${f.severity}] ${f.step} (${f.role}): ${f.file}${f.line ? ':' + f.line : ''} — ${f.description} → ${f.recommendation}`);
+      // "No pending findings" only when every review step finished with nothing at all.
+      failures.forEach(f => ul.appendChild(el('li', 'sev-high', t(f.status === 'failed' ? 'review.failed' : 'review.unfinished',
+        { step: f.step, status: f.status, detail: f.detail }))));
+      if (!findings.length && !failures.length) ul.appendChild(el('li', 'none', t('review.findings.none')));
+      defects.forEach(f => ul.appendChild(item(f)));
+      const vl = $('validationFindings'); clear(vl);
+      evidence.forEach(f => vl.appendChild(item(f)));
+      $('validationBox').hidden = !evidence.length;
+      $('mergeReady').textContent = t(pipe.ready_to_merge ? 'review.ready' : 'review.notReady');
+      $('mergeReady').classList.toggle('warn', !pipe.ready_to_merge);
       const d = $('pipeDiff'); clear(d); d.appendChild(diffPre(pipe.diff));
       $('pipeCmds').textContent = (pipe.commands || []).join('\n');
       $('pMerge').disabled = st !== 'review';
@@ -630,7 +642,7 @@
     running = true; pipelineLive = true; $('results').hidden = true; resetStage();
     stream(r.offset);
   }
-  function merge() { if (confirm(t('review.confirm.merge', { branch: pipe.branch }))) pipePost('/api/pipeline/merge'); }
+  function merge() { if (confirm(t(pipe.ready_to_merge ? 'review.confirm.merge' : 'review.confirm.mergeNotReady', { branch: pipe.branch }))) pipePost('/api/pipeline/merge'); }
   // Cmd/Ctrl+Enter approves whatever is pending, always after a confirmation.
   function approvePending() {
     if (pipe.state === 'proposed') { if (confirm(t('review.confirm.approve', { n: pipe.plan ? pipe.plan.steps.length : 0 }))) approvePlan(); }

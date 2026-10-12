@@ -3,6 +3,35 @@
 All notable changes to Uno. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-10-12
+
+### Added
+- **Findings have an optional `kind`: `defect` (the default) or `evidence`.** A reviewer uses
+  `evidence` only when the problem is missing, stale or unverifiable execution evidence, never
+  for a defect visible in the code. The findings schema, the strict parser (an unknown kind is
+  rejected like an unknown severity) and the default reviewer roles' output format know it.
+  Findings without `kind` behave exactly as before. Existing `.uno/` roles are not rewritten.
+- **Validation pending** section in the review panel (English and Spanish) listing evidence
+  findings with their severity, and a *ready to merge* line: every step done, no medium/high
+  defect and no evidence finding pending. Merging a result that is not ready asks for a second
+  confirmation.
+
+### Changed
+- Only medium/high **defect** findings start correction rounds, count toward the limit and raise
+  the Resume/Cancel question. An evidence finding ("no execution evidence supplied") no longer
+  consumes the rounds, since editing code cannot fix it.
+- The Resume/Cancel question now says to use the **Resume** or **Cancel** button (typing in the
+  chat does not answer it), and both buttons are highlighted while a question is pending.
+
+### Fixed
+- The review panel no longer says "No pending findings" when a reviewer step failed or returned
+  malformed findings: it shows "Review failed: <step>: <detail>", and the run summary in the chat
+  names it.
+
+### Security
+- `kind` is model output. Evidence findings are never hidden or downgraded and always block
+  merge readiness, so a prompt-injected reviewer cannot use `kind` to skip human review.
+
 ## [0.3.2] — 2026-10-12
 
 ### Fixed
