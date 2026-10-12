@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from uno_orchestra import orchestrator, scope, worktree
+from uno_orchestra import orchestrator, scope, worker, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import (DENIED_TOOLS, MAX_TURNS, PRESETS, Task, Worker, agent_env,
                               agent_settings, write_agent_config)
@@ -187,6 +187,66 @@ def test_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
         time.sleep(0.05)
     else:
         pytest.fail("process group still alive")
+
+
+def test_stream_json_lines_over_64_kib(tmp_path, monkeypatch):
+    # A fake claude prints a 200 KiB tool result (e.g. a Read of a large file) between turns.
+    # The line is built inside the script: one argv string is capped at 128 KiB on Linux.
+    lines = [{"type": "system", "subtype": "init", "model": "fake"},
+             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+             {"type": "user", "message": {"content": [{"type": "tool_result", "content": "BIG"}]}},
+             {"type": "result", "result": "ok"}]
+    script = (f"import json; lines = {lines!r}\n"
+              "for l in lines: print(json.dumps(l).replace('BIG', 'x' * 200_000))")
+    monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
+
+    def run_claude():
+        events = tmp_path / "e.jsonl"
+        events.unlink(missing_ok=True)
+        w = Worker(T("big"), tmp_path, "b", EventBus(events), backend="claude", config_dir=tmp_path)
+        asyncio.run(w._run_claude())
+        return w, [e for e in events_of(events) if e["kind"] == "warning"]
+
+    w, warnings = run_claude()  # under STREAM_LIMIT: parsed normally
+    assert w.output == "ok" and w.model_used == "fake" and not warnings
+    monkeypatch.setattr(worker, "STREAM_LIMIT", 64 * 1024)  # over it: dropped with a warning
+    w, warnings = run_claude()
+    assert w.output == "ok" and w.turns == 1 and warnings  # one per dropped chunk
+    assert all("65536-byte limit" in e["message"] for e in warnings)
+
+
+def run_fake_claude(tmp_path, monkeypatch, script):
+    # asyncio buffers an unread pipe up to 2 * limit before pausing it, so with the real 16 MiB
+    # limit the hang needs > 32 MiB of stderr; at main's 64 KiB, 1 MiB is enough to show it.
+    monkeypatch.setattr(worker, "STREAM_LIMIT", 64 * 1024)
+    monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
+    w = Worker(T("noisy"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), backend="claude",
+               config_dir=tmp_path)
+    asyncio.run(asyncio.wait_for(w._run_claude(), 20))  # before the fix: blocked on a full pipe
+    return w
+
+
+def test_large_stderr_does_not_block_the_agent(tmp_path, monkeypatch):
+    script = ("import sys; sys.stderr.write('x' * (1 << 20)); sys.stderr.flush()\n"
+              "print('{\"type\": \"result\", \"result\": \"ok\"}')")
+    assert run_fake_claude(tmp_path, monkeypatch, script).output == "ok"
+
+
+def test_large_stderr_failure_keeps_a_truncated_tail(tmp_path, monkeypatch):
+    script = "import sys; sys.stderr.write('START' + 'x' * (1 << 20) + 'real error at the end'); sys.exit(3)"
+    with pytest.raises(RuntimeError) as exc:
+        run_fake_claude(tmp_path, monkeypatch, script)
+    msg = str(exc.value)
+    assert msg.startswith("claude exited with 3: ") and msg.endswith("real error at the end")
+    assert "START" not in msg and len(msg) <= len("claude exited with 3: ") + 300
+
+
+    async def tail():  # only the last STDERR_TAIL bytes are kept in memory
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"START" + b"y" * (1 << 20))
+        reader.feed_eof()
+        return await worker.read_tail(reader, worker.STDERR_TAIL)
+    assert asyncio.run(tail()) == b"y" * (64 * 1024)
 
 
 # --- 4. git ------------------------------------------------------------------------------

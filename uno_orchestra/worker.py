@@ -27,6 +27,8 @@ PRESETS = {
 DENIED_TOOLS = ["Bash", "WebFetch", "WebSearch", "mcp__*"]
 MAX_TURNS = 50
 KILL_GRACE = 5  # seconds between SIGTERM and SIGKILL
+STREAM_LIMIT = 16 * 1024 * 1024  # max bytes of one stream-json line (asyncio's default is 64 KiB)
+STDERR_TAIL = 64 * 1024  # last bytes of the agent's stderr kept for the error message
 OUTPUTS = ("text", "findings")
 # Structured output of a reviewer role (pipeline mode). Parsed strictly by pipeline.parse_findings.
 FINDINGS_SCHEMA = {
@@ -54,6 +56,14 @@ ENV_ALLOWLIST = (
 # Passed only with `uno config set auth api-key`: never by the mere presence of the variable.
 API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 AUTH_MODES = ("account", "api-key")
+
+
+async def read_tail(stream, limit):
+    """Read a stream to EOF, keeping only its last `limit` bytes."""
+    tail = b""
+    while chunk := await stream.read(65536):
+        tail = (tail + chunk)[-limit:]
+    return tail
 
 
 def agent_env(environ=None, auth="account"):
@@ -263,6 +273,7 @@ class Worker:
             start_new_session=True,  # own process group: terminate() can kill the whole tree
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=STREAM_LIMIT,
         )
         try:
             await self._read_stream(self.proc)
@@ -289,11 +300,37 @@ class Worker:
         await proc.wait()
 
     async def _read_stream(self, proc):
+        # stderr is drained in parallel: a full pipe would block the agent until the timeout.
+        stderr = asyncio.ensure_future(read_tail(proc.stderr, STDERR_TAIL))
+        try:
+            await self._read_stdout(proc)
+            code = await proc.wait()
+            if code != 0:
+                err = (await stderr).decode(errors="replace").strip()
+                if "unrecognized_model" in err:
+                    raise self._model_error()
+                raise RuntimeError(f"claude exited with {code}: {err[-300:]}")  # the end has the error
+        finally:
+            stderr.cancel()
+
+    async def _read_stdout(self, proc):
         turns = 0
-        async for raw in proc.stdout:
+        while True:
+            try:
+                raw = await proc.stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # readline already dropped the oversized line, or a STREAM_LIMIT chunk of it
+                # (one warning per chunk; a leftover tail fails to parse below). A lost result
+                # line leaves output unset, so a reviewer fails as "malformed findings".
+                self.bus.emit(self.name, "warning", f"dropped a stream-json line over the {STREAM_LIMIT}-byte limit")
+                continue
+            if not raw:
+                break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):  # e.g. the numeric tail of a dropped line
                 continue
             kind = msg.get("type")
             if kind == "system" and msg.get("subtype") == "init" and msg.get("model"):
@@ -321,9 +358,3 @@ class Worker:
                         raise self._model_error()
                     raise RuntimeError(text)
                 self.output = msg.get("structured_output", msg.get("result"))
-        code = await proc.wait()
-        if code != 0:
-            err = (await proc.stderr.read()).decode(errors="replace").strip()
-            if "unrecognized_model" in err:
-                raise self._model_error()
-            raise RuntimeError(f"claude exited with {code}: {err[:300]}")

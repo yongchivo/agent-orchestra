@@ -520,7 +520,7 @@ def test_get_and_head_never_touch_studio_state(ui):
 
 def test_version_and_changelog():
     from uno_orchestra import __version__
-    assert __version__ == "0.3.0"                                                  # phase 6
+    assert __version__ == "0.3.2"                                                  # phase 6 + stream fixes
     assert f'version = "{__version__}"' in (ROOT / "pyproject.toml").read_text()
     assert f"## [{__version__}]" in (ROOT / "CHANGELOG.md").read_text()
     assert "## Prompt Studio" in (ROOT / "README.md").read_text()
