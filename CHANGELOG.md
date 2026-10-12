@@ -3,6 +3,15 @@
 All notable changes to Uno. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-10-12
+
+### Fixed
+- **An agent no longer fails on a stream-json line over 64 KiB** (e.g. a Read of a large file),
+  which ended it with "Separator is found, but chunk is longer than limit". The `claude`
+  subprocess is read with a 16 MiB line limit; a line over that limit is dropped with a
+  `warning` event instead of failing the agent. A dropped `result` line still leaves no output,
+  so a reviewer fails as "malformed findings" instead of passing. No control was relaxed.
+
 ## [0.3.0] — 2026-10-12 — Phase 6: Prompt Studio
 
 A "Prompts" tab that turns a short idea into a structured, detailed prompt to create, fix,
@@ -226,6 +235,7 @@ third-party dependencies.
   `--bare`) only after `uno config set auth api-key`. `uno doctor` shows the active mode and
   warns when a key in the environment is ignored.
 
+[0.3.1]: https://github.com/yongchivo/uno-orchestra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yongchivo/uno-orchestra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yongchivo/uno-orchestra/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yongchivo/uno-orchestra/releases/tag/v0.1.0

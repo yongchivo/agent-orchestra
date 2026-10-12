@@ -27,6 +27,7 @@ PRESETS = {
 DENIED_TOOLS = ["Bash", "WebFetch", "WebSearch", "mcp__*"]
 MAX_TURNS = 50
 KILL_GRACE = 5  # seconds between SIGTERM and SIGKILL
+STREAM_LIMIT = 16 * 1024 * 1024  # max bytes of one stream-json line (asyncio's default is 64 KiB)
 OUTPUTS = ("text", "findings")
 # Structured output of a reviewer role (pipeline mode). Parsed strictly by pipeline.parse_findings.
 FINDINGS_SCHEMA = {
@@ -263,6 +264,7 @@ class Worker:
             start_new_session=True,  # own process group: terminate() can kill the whole tree
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=STREAM_LIMIT,
         )
         try:
             await self._read_stream(self.proc)
@@ -290,10 +292,22 @@ class Worker:
 
     async def _read_stream(self, proc):
         turns = 0
-        async for raw in proc.stdout:
+        while True:
+            try:
+                raw = await proc.stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # readline already dropped the oversized line, or a STREAM_LIMIT chunk of it (one
+                # warning per chunk; a leftover tail fails to parse below). A lost result line leaves output unset,
+                # so a reviewer still fails as "malformed findings" instead of passing.
+                self.bus.emit(self.name, "warning", f"dropped a stream-json line over the {STREAM_LIMIT}-byte limit")
+                continue
+            if not raw:
+                break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):  # e.g. the numeric tail of a dropped line
                 continue
             kind = msg.get("type")
             if kind == "system" and msg.get("subtype") == "init" and msg.get("model"):

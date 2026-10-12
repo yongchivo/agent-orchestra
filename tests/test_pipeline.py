@@ -824,10 +824,7 @@ def test_unavailable_model_is_a_clear_error(tmp_path):
 
     class FakeStream:
         def __init__(self, lines): self.lines = lines
-        def __aiter__(self): return self
-        async def __anext__(self):
-            if not self.lines: raise StopAsyncIteration
-            return self.lines.pop(0)
+        async def readline(self): return self.lines.pop(0) if self.lines else b""
         async def read(self): return b"[claude-code:unrecognized_model] {\"model\":\"opus\"}\n"
 
     class FakeProc:

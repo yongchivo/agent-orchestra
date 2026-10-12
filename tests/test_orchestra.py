@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from uno_orchestra import orchestrator, scope, worktree
+from uno_orchestra import orchestrator, scope, worker, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import (DENIED_TOOLS, MAX_TURNS, PRESETS, Task, Worker, agent_env,
                               agent_settings, write_agent_config)
@@ -187,6 +187,32 @@ def test_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
         time.sleep(0.05)
     else:
         pytest.fail("process group still alive")
+
+
+def test_stream_json_lines_over_64_kib(tmp_path, monkeypatch):
+    # A fake claude prints a 200 KiB tool result (e.g. a Read of a large file) between turns.
+    big = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                "content": "x" * 200_000}]}})
+    lines = [{"type": "system", "subtype": "init", "model": "fake"},
+             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}}]
+    script = (f"import json, sys; lines = {lines!r}\n"
+              "for l in lines: print(json.dumps(l))\n"
+              f"print({big!r}); print(json.dumps({{'type': 'result', 'result': 'ok'}}))")
+    monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
+
+    def run_claude():
+        events = tmp_path / "e.jsonl"
+        events.unlink(missing_ok=True)
+        w = Worker(T("big"), tmp_path, "b", EventBus(events), backend="claude", config_dir=tmp_path)
+        asyncio.run(w._run_claude())
+        return w, [e for e in events_of(events) if e["kind"] == "warning"]
+
+    w, warnings = run_claude()  # under STREAM_LIMIT: parsed normally
+    assert w.output == "ok" and w.model_used == "fake" and not warnings
+    monkeypatch.setattr(worker, "STREAM_LIMIT", 64 * 1024)  # over it: dropped with a warning
+    w, warnings = run_claude()
+    assert w.output == "ok" and w.turns == 1 and warnings  # one per dropped chunk
+    assert all("65536-byte limit" in e["message"] for e in warnings)
 
 
 # --- 4. git ------------------------------------------------------------------------------
