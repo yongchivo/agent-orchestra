@@ -3,6 +3,16 @@
 All notable changes to Uno. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-10-12
+
+### Fixed
+- **A lot of output on the agent's stderr no longer blocks it until the timeout.** stderr was
+  read only after the `claude` process ended; asyncio stops reading an unread pipe once its
+  buffer is full (2 × the line limit), so a noisy agent blocked writing to it. stderr is now
+  drained in parallel with stdout and only its last 64 KiB are kept. The error message is still
+  truncated to 300 characters, now taken from the end of stderr, where the error is. No control
+  was relaxed.
+
 ## [0.3.1] — 2026-10-12
 
 ### Fixed
@@ -235,6 +245,7 @@ third-party dependencies.
   `--bare`) only after `uno config set auth api-key`. `uno doctor` shows the active mode and
   warns when a key in the environment is ignored.
 
+[0.3.2]: https://github.com/yongchivo/uno-orchestra/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yongchivo/uno-orchestra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yongchivo/uno-orchestra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yongchivo/uno-orchestra/compare/v0.1.0...v0.2.0

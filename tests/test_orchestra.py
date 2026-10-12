@@ -215,6 +215,40 @@ def test_stream_json_lines_over_64_kib(tmp_path, monkeypatch):
     assert all("65536-byte limit" in e["message"] for e in warnings)
 
 
+def run_fake_claude(tmp_path, monkeypatch, script):
+    # asyncio buffers an unread pipe up to 2 * limit before pausing it, so with the real 16 MiB
+    # limit the hang needs > 32 MiB of stderr; at main's 64 KiB, 1 MiB is enough to show it.
+    monkeypatch.setattr(worker, "STREAM_LIMIT", 64 * 1024)
+    monkeypatch.setattr(Worker, "command", lambda self, env=None: [sys.executable, "-c", script])
+    w = Worker(T("noisy"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), backend="claude",
+               config_dir=tmp_path)
+    asyncio.run(asyncio.wait_for(w._run_claude(), 20))  # before the fix: blocked on a full pipe
+    return w
+
+
+def test_large_stderr_does_not_block_the_agent(tmp_path, monkeypatch):
+    script = ("import sys; sys.stderr.write('x' * (1 << 20)); sys.stderr.flush()\n"
+              "print('{\"type\": \"result\", \"result\": \"ok\"}')")
+    assert run_fake_claude(tmp_path, monkeypatch, script).output == "ok"
+
+
+def test_large_stderr_failure_keeps_a_truncated_tail(tmp_path, monkeypatch):
+    script = "import sys; sys.stderr.write('START' + 'x' * (1 << 20) + 'real error at the end'); sys.exit(3)"
+    with pytest.raises(RuntimeError) as exc:
+        run_fake_claude(tmp_path, monkeypatch, script)
+    msg = str(exc.value)
+    assert msg.startswith("claude exited with 3: ") and msg.endswith("real error at the end")
+    assert "START" not in msg and len(msg) <= len("claude exited with 3: ") + 300
+
+
+    async def tail():  # only the last STDERR_TAIL bytes are kept in memory
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"START" + b"y" * (1 << 20))
+        reader.feed_eof()
+        return await worker.read_tail(reader, worker.STDERR_TAIL)
+    assert asyncio.run(tail()) == b"y" * (64 * 1024)
+
+
 # --- 4. git ------------------------------------------------------------------------------
 
 def test_git_hooks_and_fsmonitor_never_run(repo, tmp_path):
