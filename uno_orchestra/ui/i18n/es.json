@@ -24,7 +24,7 @@
   "chat.resume": "Reanudar",
   "chat.cancel": "Cancelar",
   "chat.iters": "rondas de corrección",
-  "chat.iters.hint": "los hallazgos medios/altos vuelven al desarrollador como mucho estas veces; después el orquestador te pregunta",
+  "chat.iters.hint": "los defectos medios/altos vuelven al desarrollador como mucho estas veces; después el orquestador te pregunta",
   "chat.round": "ronda {n}/{max}",
   "chat.backend": "backend",
   "chat.parallel": "paralelo",
@@ -276,5 +276,12 @@
   "ps.target.hint.uno": "el planner reparte las tareas entre los roles; sin ramas, commits ni PR (los gestiona el orquestador)",
   "ps.send.notUno": "Este prompt se generó para Claude Code: genera uno con destino «Orquestador de Uno» antes de enviarlo.",
   "ps.send.regenerate": "Este prompt se generó para Claude Code (ramas, commits, PR). ¿Regenerarlo con destino «Orquestador de Uno» con las mismas entradas? No se enviará tal cual.",
-  "lint.git_instructions": "destino Uno: instrucción de rama, commit, push o PR (los agentes de Uno no las ejecutan)"
+  "lint.git_instructions": "destino Uno: instrucción de rama, commit, push o PR (los agentes de Uno no las ejecutan)",
+  "review.validation": "Validación pendiente",
+  "review.validation.hint": "Evidencia de ejecución que los revisores no pudieron verificar (tests, ejecuciones). No se devuelve al desarrollador: compruébala tú antes de fusionar.",
+  "review.failed": "La revisión falló: {step}: {detail}",
+  "review.unfinished": "La revisión no terminó ({status}): {step}: {detail}",
+  "review.ready": "Listo para fusionar: todos los pasos terminaron, sin hallazgos medios/altos ni validación pendiente.",
+  "review.notReady": "No está listo para fusionar: una revisión falló o hay hallazgos o validación pendientes. Revísalos antes de fusionar.",
+  "review.confirm.mergeNotReady": "Este resultado NO está listo para fusionar (una revisión falló o hay hallazgos o validación pendientes). ¿Fusionar {branch} en tu rama de todos modos?"
 }

@@ -296,8 +296,12 @@ def save_protected_paths(repo, paths, truncated=None, references=None):
                   references=check_references(repo, list(references or []), protected))
 
 
-FINDINGS_FORMAT = ('JSON only: {"findings": [{"severity": "low|medium|high", "file": "path", '
-                   '"line": 0, "description": "...", "recommendation": "..."}]}. '
+FINDINGS_FORMAT = ('JSON only: {"findings": [{"severity": "low|medium|high", "kind": "defect|evidence", '
+                   '"file": "path", "line": 0, "description": "...", "recommendation": "..."}]}. '
+                   'kind: use "evidence" only when the problem is missing, stale or unverifiable '
+                   "execution evidence (tests or runs you were not shown and cannot check), never "
+                   'for a defect visible in the code; use "defect" otherwise. Evidence findings are '
+                   "not sent back to the developer: the user validates them before merging. "
                    "An empty list means nothing to report.")
 
 TEMPLATES = [

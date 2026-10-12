@@ -372,7 +372,8 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
                       you approve ──> one worktree per step, from an integration branch agent/<run>/_pipeline
                                       merge gate per step (paths, protected files, symlinks, secrets, .uno/)
                                       artifacts to the next role as labelled UNTRUSTED data
-                                      medium/high findings ──> developer again (≤ max rounds, default 2) ──> asks you
+                                      medium/high defect findings ──> developer again (≤ max rounds, default 2) ──> asks you
+                                      evidence findings ──> stay pending as "Validation pending" (never back to the developer)
                                                               │
                       you click Merge ──> integration branch merged into your branch. Not before.
 ```
@@ -386,7 +387,7 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
  "preset": "readonly",
  "paths": ["**"],
  "output": "findings",
- "output_format": "JSON only: {\"findings\": [{\"severity\": \"low|medium|high\", \"file\", \"line\", \"description\", \"recommendation\"}]}",
+ "output_format": "JSON only: {\"findings\": [{\"severity\": \"low|medium|high\", \"kind\": \"defect|evidence\", \"file\", \"line\", \"description\", \"recommendation\"}]} ...",
  "max_turns": 15}
 ```
 
@@ -394,7 +395,14 @@ you ──chat──> planner (Claude, NO tools, JSON output) ──> plan {step
 - `paths` are the role's default globs and the outer limit for any step with that role.
 - `output` is `text` or `findings`. A `findings` role runs with `--json-schema`, so the CLI
   enforces the shape, and the result is parsed strictly again by the code (severity in
-  `low|medium|high`, texts capped, at most 50 items).
+  `low|medium|high`, optional `kind` in `defect|evidence` defaulting to `defect`, texts capped,
+  at most 50 items).
+- A finding's `kind` is `evidence` only when the problem is missing, stale or unverifiable
+  execution evidence (tests or runs the reviewer was not shown), never a defect visible in the
+  code. Evidence findings cannot be fixed by editing code, so they never go back to the
+  developer, never count toward the correction rounds and never raise the Resume/Cancel
+  question. They are never hidden either: the review panel lists them, with their severity,
+  under **Validation pending**, and the result is not *ready to merge* while any is pending.
 - Unknown fields, bad names, absolute paths, `..`, paths under `.uno/` and oversized
   texts are rejected with the same schema on save and on load, so a tampered file is an error,
   not a role.
@@ -453,16 +461,21 @@ dashboard.
 
 ![Dashboard during a pipeline](docs/dashboard-pipeline.jpg)
 
-**Correction loop.** When a reviewer returns medium or high findings, the developer step(s) it
-depends on run again with those findings as an artifact, then the reviewers run again on the new
-state. This happens at most `max correction rounds` times (default 2, hard cap 5). After that the
-run stops with a `question` in the chat: **Resume** continues with the findings pending, **Cancel**
-stops. You can **Pause** and **Resume** at any time; a new message while a plan runs cancels the
+**Correction loop.** When a reviewer returns medium or high `defect` findings, the developer
+step(s) it depends on run again with those findings as an artifact, then the reviewers run again
+on the new state. `evidence` findings are not sent back (see Roles above). This happens at most
+`max correction rounds` times (default 2, hard cap 5). After that the run stops with a `question`
+in the chat, answered with the buttons, not by typing: **Resume** continues with the findings
+pending, **Cancel** stops. You can **Pause** and **Resume** at any time; a new message while a plan runs cancels the
 steps in flight (the work already merged into the integration branch stays) and asks the planner
 again, which is how you redirect.
 
-**Review and merge.** When the run ends the panel shows every pending finding and the
-consolidated diff of the integration branch against your branch. **Merge into my branch** is the
+**Review and merge.** When the run ends the panel shows every pending finding (evidence
+findings in a separate **Validation pending** list), any reviewer step that failed or returned
+malformed findings as **Review failed: …** (never as "No pending findings"), whether the result
+is *ready to merge* (every step done, no medium/high defect, no evidence pending), and the
+consolidated diff of the integration branch against your branch. Merging a result that is not
+ready asks for an explicit second confirmation. **Merge into my branch** is the
 only path to your branch; nothing happens without it. If you close the session instead, the
 branch `agent/<run>/_pipeline` stays for inspection, with the `git diff` and `git merge`
 commands shown.
@@ -634,6 +647,7 @@ on the branch), the user's Anthropic quota, and the event log.
 | Manipulated orchestrator (planner) | A repository file, a previous artifact or a jailbroken model makes the planner propose a step with a non-existent role, a wider preset, paths outside the role, `tools`, or dozens of steps | the planner has no tools and never executes; `validate_plan` enforces roles, presets, paths, the step cap and a DAG; the user sees the plan and approves it; the planner never sees repository files or agent output, only the confirmed roles and context, the chat and a code-built state summary |
 | Malicious `.uno/` in the repository | Role instructions that tell the developer to copy credentials or the reviewer to report nothing | roles are shown and confirmed in the UI before use, with a hash kept outside the repository; the gate and the deny rules apply regardless of what a role says |
 | Reviewer that lies or is bribed | A reviewer reports no findings for a change that adds a secret, edits CI or leaves its paths | reviewers are advisory: the gate (paths, protected files, secrets, symlinks, `.uno/`) decides, and the final merge is the user's click with the diff in front of them |
+| Reviewer that mislabels a finding | A prompt-injected reviewer marks a real defect `"kind": "evidence"` so it skips the correction loop | `kind` only decides whether a finding goes back to the developer; evidence findings are never hidden or downgraded, are listed under Validation pending with their severity, and always keep the result from being ready to merge, so the user still reviews them |
 
 **STRIDE, briefly**
 

@@ -24,7 +24,7 @@
   "chat.resume": "Resume",
   "chat.cancel": "Cancel",
   "chat.iters": "correction rounds",
-  "chat.iters.hint": "reviewers' medium/high findings go back to the developer at most this many times; then the orchestrator asks you",
+  "chat.iters.hint": "reviewers' medium/high defect findings go back to the developer at most this many times; then the orchestrator asks you",
   "chat.round": "round {n}/{max}",
   "chat.backend": "backend",
   "chat.parallel": "parallel",
@@ -276,5 +276,12 @@
   "ps.target.hint.uno": "the planner splits the tasks between the roles; no branches, commits or PRs (the orchestrator manages them)",
   "ps.send.notUno": "This prompt was generated for Claude Code: generate one with target “Uno's orchestrator” before sending it.",
   "ps.send.regenerate": "This prompt was generated for Claude Code (branches, commits, PR). Regenerate it for “Uno's orchestrator” with the same inputs? It will not be sent as it is.",
-  "lint.git_instructions": "target Uno: branch, commit, push or PR instruction (Uno's agents never run them)"
+  "lint.git_instructions": "target Uno: branch, commit, push or PR instruction (Uno's agents never run them)",
+  "review.validation": "Validation pending",
+  "review.validation.hint": "Execution evidence the reviewers could not verify (tests, runs). It is not sent back to the developer: check it yourself before merging.",
+  "review.failed": "Review failed: {step}: {detail}",
+  "review.unfinished": "Review did not finish ({status}): {step}: {detail}",
+  "review.ready": "Ready to merge: every step finished, no medium/high finding and no validation pending.",
+  "review.notReady": "Not ready to merge: a review failed, or findings or validation are pending. Check them before merging.",
+  "review.confirm.mergeNotReady": "This result is NOT ready to merge (a review failed, or findings or validation are pending). Merge {branch} into your branch anyway?"
 }

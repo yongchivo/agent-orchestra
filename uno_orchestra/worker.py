@@ -36,6 +36,7 @@ FINDINGS_SCHEMA = {
     "properties": {"findings": {"type": "array", "items": {
         "type": "object",
         "properties": {"severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                       "kind": {"type": "string", "enum": ["defect", "evidence"]},
                        "file": {"type": "string"}, "line": {"type": "integer"},
                        "description": {"type": "string"}, "recommendation": {"type": "string"}},
         "required": ["severity", "file", "description", "recommendation"]}}},

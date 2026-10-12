@@ -342,7 +342,10 @@ class Chat:
         if self.error:
             msg += f" {self.error}."
         if pending:
-            msg += f" {len(pending)} findings pending ({len(pipeline.severe(pending))} medium/high)."
+            msg += (f" {len(pending)} findings pending ({len(pipeline.severe(pending))} medium/high, "
+                    f"{len(pipeline.evidence(pending))} awaiting validation).")
+        for f in r.get("review_failures", []):
+            msg += f" Review {f['step']} did not finish: {f['detail']}."
         msg += " Review the consolidated diff below; nothing reaches your branch until you merge."
         self.say("orchestrator", msg)
         self.state = "review"
@@ -418,7 +421,10 @@ class Chat:
             out["planner_override_only"] = models.is_override_only(self.planner[0]) if self.planner else False
         if self.state in ("review", "merged") and self.branch:
             out["diff"] = pipeline.consolidated_diff(self.repo, self.base, self.branch, MAX_DIFF)
-            out["pending_findings"] = (self.result or {}).get("pending_findings", [])
+            res = self.result or {}
+            out["pending_findings"] = res.get("pending_findings", [])
+            out["review_failures"] = res.get("review_failures", [])
+            out["ready_to_merge"] = bool(res.get("ready_to_merge"))
             out["commands"] = [f"git -C {self.repo} diff {self.base[:12]} {self.branch}",
                                f"git -C {self.repo} merge --no-ff {self.branch}"]
         return out
