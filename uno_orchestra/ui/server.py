@@ -7,7 +7,9 @@ restricted to allowed roots, permission presets only, no inline scripts, and aut
 shutdown after a period of inactivity. Static files (page, script, style, i18n dictionaries)
 come from an allowlist; brand images come from four fixed routes mapped to fixed PNG files
 under <state-dir>/theme/ (signature and size checked, 404 otherwise). The core (orchestra/)
-is invoked as it is; nothing here relaxes a control.
+is invoked as it is; nothing here relaxes a control. The Prompt Studio (/api/prompts/*) runs
+one no-tools generation at a time, redacts secrets before the model, keeps its library in the
+state directory and hands a prompt to the orchestrator only as a plan the user must approve.
 """
 import asyncio
 import datetime
@@ -23,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from uno_orchestra import __version__, config, models, orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra import __version__, config, models, orchestrator, pipeline, prompts, roles as roles_mod, scope, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
@@ -197,10 +199,12 @@ class Chat:
         return self.state in self.ACTIVE
 
     # -- chat
-    def message(self, body):
+    def message(self, body, limit=MAX_CHAT):
+        """`limit` is MAX_CHAT for the chat box; the Prompt Studio hands over a linted prompt
+        of at most prompts.MAX_PROMPT_OUT characters by the same path (plan, then approval)."""
         text = body.get("message")
-        if not isinstance(text, str) or not text.strip() or len(text) > MAX_CHAT:
-            raise ValueError(f"message must be a non-empty string of at most {MAX_CHAT} characters")
+        if not isinstance(text, str) or not text.strip() or len(text) > limit:
+            raise ValueError(f"message must be a non-empty string of at most {limit} characters")
         text = text.strip()
         cmd = self.COMMANDS.get(text.lower())
         if cmd:
@@ -436,6 +440,7 @@ class UIServer(ThreadingHTTPServer):
         self.agent_timeout = agent_timeout
         self.last_activity = time.monotonic()
         self.lock = threading.Lock()
+        self.studio_lock = threading.Lock()   # one prompt generation at a time
         self.run = None  # the current or last run
         self.chat = Chat(self)
         self.events_path = self.state_dir / "events.jsonl"
@@ -768,6 +773,159 @@ class UIServer(ThreadingHTTPServer):
         return {"branch": name}
 
 
+    # -- Prompt Studio (prompts.py): no tools, redacted inputs, library in the state directory
+    def studio_view(self):
+        default = models.default_for("prompt-studio")
+        return {"modes": list(prompts.MODES), "details": list(prompts.DETAILS), "langs": list(prompts.LANGS), "targets": list(prompts.TARGETS),
+                "templates": [{k: t[k] for k in ("name", "mode", "instructions", "builtin", "version", "versions")}
+                              for t in prompts.templates(self.state_dir).values()],
+                "default": {"model": default[0], "effort": default[1]},
+                "limits": {"idea": prompts.MAX_IDEA, "field": prompts.MAX_FIELD, "prompt": prompts.MAX_PROMPT_IN,
+                           "changes": prompts.MAX_CHANGES, "output": prompts.MAX_PROMPT_OUT, "tags": prompts.MAX_TAGS}}
+
+    def _studio_setup(self, body):
+        """Inputs, project summary, model and effort for one call. Fable (override-only) needs
+        `confirm_override_only: true` in the same request, like approving a plan that uses it."""
+        inp = prompts.check_inputs(body)
+        backend = body.get("backend", "claude")
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {list(BACKENDS)}")
+        default = models.default_for("prompt-studio")
+        model, effort = body.get("model", default[0]), body.get("effort", default[1])
+        models.check(model, effort, override=True)   # a per-request choice; nothing here is saved
+        if models.is_override_only(model) and body.get("confirm_override_only") is not True:
+            return None, {"error": "this generation uses Fable (billed outside your normal limit): confirm it explicitly",
+                          "code": "confirm_override_only"}
+        project, roles = None, {}
+        if body.get("repo"):
+            repo = validate_repo(body.get("repo"), self.allowed_roots)
+            self.remember_repo(repo)
+            try:
+                roles, context = roles_mod.load_roles(repo), roles_mod.project_context(repo)
+            except ValueError as exc:
+                raise ValueError(f"the project's .uno/ does not validate: {exc}") from exc
+            project = prompts.project_summary(repo, roles, context)
+        template = prompts.templates(self.state_dir).get(inp["template"] or inp["mode"])
+        if template is None:
+            raise ValueError("no such template")
+        return {"inp": inp, "backend": backend, "model": model, "effort": effort, "project": project,
+                "roles": roles, "template": template}, None
+
+    def _studio_call(self, body, fn):
+        if not self.studio_lock.acquire(blocking=False):
+            return 409, {"error": "a prompt generation is already in progress"}
+        try:
+            setup, refused = self._studio_setup(body)
+            if refused:
+                return 409, refused
+            return 200, fn(setup)
+        except prompts.PromptError as exc:
+            return 400, {"error": str(exc)}
+        finally:
+            self.studio_lock.release()
+
+    def studio_clarify(self, body):
+        def go(s):
+            questions = prompts.clarify(s["inp"], backend=s["backend"], model=s["model"], effort=s["effort"],
+                                        project=s["project"], cwd=str(self.state_dir), auth=config.auth_mode(self.state_dir))
+            return {"questions": questions, "model": s["model"], "effort": s["effort"],
+                    "override_only": models.is_override_only(s["model"])}
+        return self._studio_call(body, go)
+
+    def studio_generate(self, body):
+        def go(s):
+            inp = s["inp"]
+            data = prompts.generate(inp, s["template"], backend=s["backend"], model=s["model"], effort=s["effort"],
+                                    project=s["project"], cwd=str(self.state_dir), auth=config.auth_mode(self.state_dir))
+            text = prompts.render(data, inp["lang"])
+            out = {"text": text, "lint": prompts.lint(text, inp["target"]), "title": data["title"], "target": inp["target"],
+                   "assumptions": data["assumptions"], "open_questions": data["open_questions"],
+                   "suggested_roles": data["suggested_roles"],
+                   "missing_roles": [r for r in data["suggested_roles"] if r not in s["roles"]] if s["roles"] else [],
+                   "mode": inp["mode"], "lang": inp["lang"], "model": s["model"], "effort": s["effort"],
+                   "override_only": models.is_override_only(s["model"]), "template": s["template"]["name"]}
+            if inp["mode"] in ("review", "edit"):
+                out["diff"] = prompts.diff(inp["prompt"], text, "yours", "new")
+                out["lint_input"] = prompts.lint(inp["prompt"], inp["target"])
+            if inp["mode"] == "review":
+                out["review"] = data["review"]
+            return out
+        return self._studio_call(body, go)
+
+    def studio_lint(self, body):
+        text = body.get("text")
+        if not isinstance(text, str) or len(text) > prompts.MAX_PROMPT_OUT:
+            raise ValueError(f"text must be a string of at most {prompts.MAX_PROMPT_OUT} characters")
+        return prompts.lint(text, body.get("target"))
+
+    def studio_library(self, query):
+        """?q=&tag=&mode= searches (latest versions, without the text); ?name=[&version=] loads one."""
+        q = parse_qs(query)
+        name = q.get("name", [None])[0]
+        if name is None:
+            return {"entries": prompts.search(self.state_dir, q.get("q", [""])[0], q.get("tag", [""])[0], q.get("mode", [""])[0])}
+        v = q.get("version", [None])[0]
+        try:
+            version = int(v) if v is not None else None
+        except ValueError as exc:
+            raise ValueError("version must be an integer") from exc
+        return prompts.library(self.state_dir).load(name, version)
+
+    def studio_save(self, body):
+        version = prompts.library(self.state_dir).save(body)   # strict: an unknown field is an error
+        return {"saved": body.get("name"), "version": version}
+
+    def studio_delete(self, body):
+        version = body.get("version")
+        if version is not None and (not isinstance(version, int) or isinstance(version, bool)):
+            raise ValueError("version must be an integer")
+        prompts.library(self.state_dir).delete(str(body.get("name", "")), version)
+        return {"deleted": body.get("name"), "version": version}
+
+    def studio_diff(self, body):
+        """Two versions of one entry (a, b), or two texts: the diff is computed by the program."""
+        if "name" in body:
+            lib = prompts.library(self.state_dir)
+            a, b = body.get("a"), body.get("b")
+            if not all(isinstance(x, int) and not isinstance(x, bool) for x in (a, b)):
+                raise ValueError("a and b must be version numbers")
+            ea, eb = lib.load(str(body["name"]), a), lib.load(str(body["name"]), b)
+            return {"diff": prompts.diff(ea["text"], eb["text"], f"v{a}", f"v{b}")}
+        ta, tb = body.get("text_a"), body.get("text_b")
+        if not all(isinstance(x, str) and len(x) <= prompts.MAX_PROMPT_OUT for x in (ta, tb)):
+            raise ValueError(f"text_a and text_b must be strings of at most {prompts.MAX_PROMPT_OUT} characters")
+        return {"diff": prompts.diff(ta, tb)}
+
+    def studio_template_save(self, body):
+        version = prompts.Store(self.state_dir, "templates", prompts.check_template).save(body)
+        return {"saved": body.get("name"), "version": version, "templates": self.studio_view()["templates"]}
+
+    def studio_template_delete(self, body):
+        prompts.Store(self.state_dir, "templates", prompts.check_template).delete(str(body.get("name", "")))
+        return {"templates": self.studio_view()["templates"]}
+
+    def studio_send(self, body):
+        """Hand a prompt to the orchestrator: it plans, and the plan waits for the user's approval
+        in the review panel, exactly like a chat message. Never runs anything by itself, and
+        refuses a prompt in which the linter still finds a secret."""
+        text, target = body.get("text"), body.get("target")
+        if "name" in body:
+            entry = prompts.library(self.state_dir).load(str(body["name"]), body.get("version"))
+            text, target = entry["text"], entry["target"]
+        if not isinstance(text, str) or not text.strip() or len(text) > prompts.MAX_PROMPT_OUT:
+            raise ValueError(f"text must be a non-empty string of at most {prompts.MAX_PROMPT_OUT} characters")
+        if target != "uno":
+            # Generated for Claude Code (branch, commits, push, PR): not what Uno's agents can follow.
+            # The page offers to regenerate it for Uno instead of sending it as it is.
+            return 409, {"error": "this prompt was not generated for Uno's orchestrator: regenerate it with target 'uno'",
+                         "code": "target_not_uno"}
+        if prompts.has_secret(text):
+            raise ValueError("the prompt contains what looks like a secret: remove it before sending it")
+        chat_body = {k: body[k] for k in ("repo", "backend", "parallel", "max_iterations", "overrides", "planner") if k in body}
+        chat_body["message"] = text
+        return self.chat.message(chat_body, limit=prompts.MAX_PROMPT_OUT)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # keep the terminal quiet
         pass
@@ -869,6 +1027,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc))
         if path == "/api/role-templates":
             return self._json(200, srv.role_templates_view())
+        try:
+            query = urlsplit(self.path).query
+            if path == "/api/prompts":
+                return self._json(200, srv.studio_view())
+            if path == "/api/prompts/library":
+                return self._json(200, srv.studio_library(query))
+        except ValueError as exc:
+            return self._error(400, str(exc))
         if path.startswith("/api/templates/"):
             try:
                 return self._json(200, srv.load_template(path[len("/api/templates/"):]))
@@ -935,6 +1101,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/chat":
                 with srv.lock:
                     return self._json(*srv.chat.message(body))
+            if path.startswith("/api/prompts/"):
+                action = path[len("/api/prompts/"):]
+                if action in ("clarify", "generate"):
+                    return self._json(*getattr(srv, "studio_" + action)(body))
+                if action == "send":
+                    with srv.lock:
+                        return self._json(*srv.studio_send(body))
+                simple = {"lint": srv.studio_lint, "library": srv.studio_save, "library/delete": srv.studio_delete,
+                          "diff": srv.studio_diff, "templates": srv.studio_template_save,
+                          "templates/delete": srv.studio_template_delete}
+                if action in simple:
+                    return self._json(200, simple[action](body))
             if path.startswith("/api/pipeline/"):
                 action = path[len("/api/pipeline/"):]
                 if action == "approve":

@@ -468,7 +468,7 @@
   }
   function renderRoles() {
     const sel = $('roleList'); const current = sel.value; clear(sel);
-    sel.appendChild(el('option', '', '(new)')).value = '';
+    sel.appendChild(el('option', '', t('roles.newOption'))).value = '';
     (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset}`); o.value = r.name; sel.appendChild(o); });
     if ([...sel.options].some(o => o.value === current)) sel.value = current;
     const lib = $('libList'); const curLib = lib.value; clear(lib);
@@ -481,12 +481,12 @@
     const untrusted = rolesData.trusted === false && !rolesData.error;
     $('rolesTrust').hidden = !untrusted;
     if (untrusted) setList($('rolesPreview'), (rolesData.roles || []).map(r =>
-      `${r.name} · ${r.preset} · ${r.output} · paths ${r.paths.join(' ')} — ${r.description} — instructions: ${r.instructions}`)
-      .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : [])
-      .concat((rolesData.references || []).map(r => `referenced document (hashed with the roles, protected from the agents): ${r.path} · ${r.size} characters`)));
-    $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
-      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
-      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
+      `${r.name} · ${r.preset} · ${r.output} · ${t('roles.preview.paths')} ${r.paths.join(' ')} — ${r.description} — ${t('roles.preview.instructions')} ${r.instructions}`)
+      .concat(rolesData.project_context ? [`${t('roles.preview.context')} ${rolesData.project_context}`] : [])
+      .concat((rolesData.references || []).map(r => t('roles.preview.reference', { path: r.path, n: r.size }))));
+    $('rolesState').textContent = (untrusted ? t('roles.state.unconfirmed') + ' · ' : '') + t('roles.state.count', { n: (rolesData.roles || []).length }) +
+      ((rolesData.uncommitted || []).length ? ` · ${t('roles.state.uncommitted', { files: rolesData.uncommitted.join(', ') })}` : '') +
+      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ' · ' + t('roles.state.truncated', { n, doc })).join('');
     $('rolesOpen').disabled = !$('repo').value.trim();
     renderOverrides(); renderSpecialChips();
     renderProjectState();
@@ -504,8 +504,8 @@
   }
   const currentRole = () => (rolesData.roles || []).find(r => r.name === $('roleList').value);
   function openRoles() {
-    if (!$('repo').value.trim()) { setList($('rolesErrors'), [t('roles.noproject')]); return; }
-    loadRoles().then(() => { fillRole(currentRole()); $('rolesDialog').showModal(); });
+    if (!$('repo').value.trim()) { setList($('rolesErrors'), [t('roles.noproject')]); return Promise.resolve(false); }
+    return loadRoles().then(() => { fillRole(currentRole()); $('rolesDialog').showModal(); return true; });
   }
   $('rolesOpen').addEventListener('click', openRoles);
   $('rolesOpen2').addEventListener('click', openRoles);
@@ -574,7 +574,7 @@
         tr.appendChild(el('td', 'mono', s.paths.join(' '))); tr.appendChild(el('td', 'mono', s.depends_on.join(', ') || '—'));
         const td = el('td'); td.appendChild(chip(s.status));
         if (s.detail) td.appendChild(el('div', 'hint', s.detail));
-        if (s.findings && s.findings.length) td.appendChild(el('div', 'hint', `${s.findings.length} findings`));
+        if (s.findings && s.findings.length) td.appendChild(el('div', 'hint', t('review.findings.count', { n: s.findings.length })));
         tr.appendChild(td);
         tr.appendChild(el('td', '', s.iteration ? String(s.iteration) : '—'));
         tb.appendChild(tr);
@@ -645,6 +645,244 @@
   $('pMerge').addEventListener('click', merge);
   $('pDiscard').addEventListener('click', () => pipePost('/api/pipeline/discard'));
 
+  // --- tabs: orchestrator / Prompt Studio. A CSS class and two `hidden` flags; nothing else.
+  function setTab(tab) {
+    const studio = tab === 'prompts';
+    document.body.classList.toggle('studio', studio);
+    $('layout').hidden = studio; $('studio').hidden = !studio;
+    $('tabSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.tab === 'prompts') === studio)));
+    if (studio && !ps.loaded) loadStudio();
+  }
+  $('tabSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
+
+  // --- Prompt Studio: idea -> questions -> structured prompt -> lint -> copy / library / orchestrator.
+  // Everything the model or the library returns is rendered with textContent; the structure,
+  // the score and the diff come from the server, never from HTML.
+  const ps = { loaded: false, view: { modes: [], templates: [] }, mode: 'create', target: 'claude-code', questions: [], result: null, lib: [], entry: null, busy: false };
+  const psBusy = on => { ps.busy = on; ['psGenerate', 'psAnswer', 'psSkip'].forEach(id => { $(id).disabled = on; }); $('psState').textContent = on ? t('ps.generating') : ''; };
+  const psErr = msgs => setList($('psErrors'), msgs);
+  function psModel() {
+    const simple = document.body.classList.contains('simple'), first = (catalog.override_only || [])[0];
+    if (!simple) return { model: $('ps-model').value, effort: $('ps-effort').value };
+    const prof = catalog.profiles[$('ps-profile').value] || (ps.view.default || {});
+    return { model: $('psFable').getAttribute('aria-pressed') === 'true' && first ? first : prof.model, effort: prof.effort };
+  }
+  function psBody() {
+    const b = { mode: ps.mode, target: ps.target, idea: $('ps-idea').value.trim(), kind: $('ps-kind').value, goal: $('ps-goal').value, stack: $('ps-stack').value,
+                avoid: $('ps-avoid').value, detail: $('ps-detail').value, lang: $('ps-lang').value, backend: $('backend').value, ...psModel() };
+    const repo = $('repo').value.trim(); if (repo) b.repo = repo;
+    const tpl = $('ps-template').value; if (tpl) b.template = tpl;
+    if (ps.mode === 'review' || ps.mode === 'edit') b.prompt = $('ps-prompt').value;
+    if (ps.mode === 'edit') b.changes = $('ps-changes').value;
+    return b;
+  }
+  function setTarget(target) {
+    ps.target = target === 'uno' ? 'uno' : 'claude-code';
+    $('psTarget').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.target === ps.target)));
+    $('psTargetHint').textContent = t('ps.target.hint.' + ps.target);
+  }
+  $('psTarget').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTarget(b.dataset.target); });
+  function renderModes() {
+    setTarget(ps.target);
+    const box = $('psModes'); clear(box);
+    ps.view.modes.forEach(m => {
+      const b = el('button', 'ghost', t('ps.mode.' + m)); b.type = 'button'; b.setAttribute('aria-pressed', String(m === ps.mode));
+      b.addEventListener('click', () => { ps.mode = m; renderModes(); });
+      box.appendChild(b);
+    });
+    const userPrompt = ps.mode === 'review' || ps.mode === 'edit';
+    $('psUserPrompt').hidden = !userPrompt; $('psChangesLabel').hidden = ps.mode !== 'edit';
+    $('ps-idea').placeholder = t(userPrompt ? 'ps.idea.' + ps.mode : 'ps.idea');
+    const sel = $('ps-template'); const cur = ps.view.templates.find(x => x.name === sel.value);
+    if (!cur || cur.mode !== ps.mode) sel.value = (ps.view.templates.find(x => x.mode === ps.mode && !x.builtin) || ps.view.templates.find(x => x.mode === ps.mode) || {}).name || '';
+  }
+  function renderTemplates() {
+    const sel = $('ps-template'), cur = sel.value; clear(sel);
+    ps.view.templates.forEach(x => { const o = el('option', '', `${x.name} · ${t(x.builtin ? 'roles.builtin' : 'roles.mine')}${x.version ? ' · v' + x.version : ''}`); o.value = x.name; sel.appendChild(o); });
+    sel.value = cur;
+    const list = $('psTplList'), curT = list.value; clear(list);
+    ps.view.templates.forEach(x => { const o = el('option', '', `${x.name} · ${t(x.builtin ? 'roles.builtin' : 'roles.mine')}`); o.value = x.name; list.appendChild(o); });
+    list.value = [...list.options].some(o => o.value === curT) ? curT : (ps.view.templates[0] || {}).name || '';
+    const modeSel = $('psTplMode'); clear(modeSel); ps.view.modes.forEach(m => { const o = el('option', '', t('ps.mode.' + m)); o.value = m; modeSel.appendChild(o); });
+    const lm = $('psLibMode'); const curM = lm.value; clear(lm); lm.appendChild(el('option', '', t('ps.anyMode'))).value = '';
+    ps.view.modes.forEach(m => { const o = el('option', '', t('ps.mode.' + m)); o.value = m; lm.appendChild(o); }); lm.value = curM;
+    fillTpl();
+  }
+  function fillTpl() {
+    const x = ps.view.templates.find(y => y.name === $('psTplList').value); if (!x) return;
+    $('psTplName').value = x.name; $('psTplMode').value = x.mode; $('psTplText').value = x.instructions;
+    $('psTplState').textContent = x.builtin ? t('roles.builtin') : t('ps.tpl.version', { n: x.version, all: (x.versions || []).join(', ') });
+  }
+  $('psTplList').addEventListener('change', fillTpl);
+  $('psTplSave').addEventListener('click', async () => {
+    try {
+      const r = await api('/api/prompts/templates', { name: $('psTplName').value.trim(), mode: $('psTplMode').value, instructions: $('psTplText').value });
+      ps.view.templates = r.templates; renderTemplates(); $('psTplList').value = r.saved; fillTpl(); psErr([]);
+    } catch (e) { psErr([e.message]); }
+  });
+  $('psTplDelete').addEventListener('click', async () => {
+    const name = $('psTplList').value; if (!name || !confirm(t('ps.tpl.confirmDelete', { name }))) return;
+    try { const r = await api('/api/prompts/templates/delete', { name }); ps.view.templates = r.templates; renderTemplates(); psErr([]); }
+    catch (e) { psErr([e.message]); }
+  });
+  async function loadStudio() {
+    try { ps.view = await api('/api/prompts'); ps.loaded = true; } catch (e) { psErr([e.message]); return; }
+    const d = ps.view.default || defaultPair('*');
+    modelSelect($('ps-model'), d.model, true); effortSelect($('ps-effort'), d.effort); profileSelect($('ps-profile'), profileOf(d.model, d.effort) || 'balanced');
+    renderTemplates(); renderModes(); loadLibrary();
+  }
+  function renderStudio() { if (!ps.loaded) return; renderTemplates(); renderModes(); renderLibrary(); if (ps.result) renderResult(ps.result); }
+  $('psFable').addEventListener('click', () => { const b = $('psFable'); b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true')); });
+
+  // step a: clarification (0-5 questions the user answers or skips), then step b.
+  async function psStart() {
+    psErr([]); $('psQuestions').hidden = true;
+    const body = psBody();
+    if (!body.idea) return psErr([t('ps.err.idea')]);
+    if (overrideOnly(body.model)) { if (!confirm(t('ps.confirmFable'))) return; body.confirm_override_only = true; }
+    psBusy(true);
+    try {
+      const r = await api('/api/prompts/clarify', body);
+      ps.questions = r.questions || [];
+      if (!ps.questions.length) return await psGenerate([], body);
+      const list = $('psQList'); clear(list);
+      ps.questions.forEach((q, i) => {
+        const lab = el('label'); lab.appendChild(el('span', '', q.question)); lab.appendChild(el('span', 'hint', q.why));
+        const inp = el('input'); inp.dataset.i = i; inp.maxLength = 500; inp.placeholder = t('ps.answer.ph'); lab.appendChild(inp); list.appendChild(lab);
+      });
+      $('psQuestions').hidden = false; list.querySelector('input').focus();
+    } catch (e) { psErr([e.message]); }
+    finally { psBusy(false); }
+  }
+  function psAnswers(skipAll) {
+    return ps.questions.map((q, i) => ({ question: q.question, answer: skipAll ? '' : ($('psQList').querySelector(`input[data-i="${i}"]`) || {}).value || '' }));
+  }
+  async function psGenerate(answers, body) {
+    body = body || psBody(); body.answers = answers;
+    if (overrideOnly(body.model) && !body.confirm_override_only) { if (!confirm(t('ps.confirmFable'))) return; body.confirm_override_only = true; }
+    psBusy(true); $('psQuestions').hidden = true;
+    try { ps.result = await api('/api/prompts/generate', body); ps.last = body; ps.entry = null; renderResult(ps.result); $('psName').value = ''; $('studioOut').scrollIntoView({ behavior: 'smooth' }); }
+    catch (e) { psErr([e.message]); }
+    finally { psBusy(false); }
+  }
+  $('psGenerate').addEventListener('click', psStart);
+  $('psAnswer').addEventListener('click', () => psGenerate(psAnswers(false)));
+  $('psSkip').addEventListener('click', () => psGenerate(psAnswers(true)));
+
+  const lintText = w => t('lint.' + w.code) + (w.detail ? ` — ${w.detail}` : '');
+  function renderLint(lint) {
+    const badge = $('psScore'); badge.textContent = String(lint.score); badge.className = 'badge ' + (lint.score >= 80 ? 'ok' : lint.score >= 50 ? 'warn' : 'bad');
+    const ul = $('psLint'); clear(ul);
+    (lint.warnings || []).forEach(w => ul.appendChild(el('li', 'sev-' + w.severity, lintText(w))));
+    if (!(lint.warnings || []).length) ul.appendChild(el('li', 'none ok', t('lint.clean')));
+  }
+  function renderResult(r) {
+    $('psEmpty').hidden = true; $('psResult').hidden = false;
+    $('psText').value = r.text;
+    renderLint(r.lint);
+    $('psMeta').textContent = [t('ps.mode.' + r.mode), t('ps.target.' + (r.target || 'claude-code')), r.lang, r.template, usageText({ model: r.model, effort: r.effort, override_only: r.override_only })].filter(Boolean).join(' · ');
+    setList($('psAssumptions'), (r.assumptions || []).length ? r.assumptions : [t('ps.none')]);
+    setList($('psOpen'), (r.open_questions || []).length ? r.open_questions : [t('ps.none')]);
+    const rv = $('psReview'); rv.hidden = !r.review;
+    if (r.review) { $('psGrade').textContent = t('ps.review.grade', { n: r.review.grade }); setList($('psProblems'), r.review.problems); }
+    const missing = r.missing_roles || []; $('psRoles').hidden = !missing.length;
+    if (missing.length) $('psRolesText').textContent = t('ps.roles.missing', { roles: missing.join(', ') });
+    $('psDiffBox').hidden = !r.diff; if (r.diff) { const d = $('psDiff'); clear(d); d.appendChild(diffPre(r.diff)); }
+    if (r.lint_input) $('psLint').insertBefore(el('li', 'none', t('ps.lint.input', { n: r.lint_input.score })), $('psLint').firstChild);
+  }
+  // The text stays editable; the server re-lints it (debounced) so the score is always the server's.
+  let lintTimer = null;
+  $('psText').addEventListener('input', () => {
+    clearTimeout(lintTimer);
+    lintTimer = setTimeout(async () => { try { renderLint(await api('/api/prompts/lint', { text: $('psText').value, target: (ps.result || {}).target || ps.target })); } catch (e) { psErr([e.message]); } }, 500);
+  });
+  $('psRolesOpen').addEventListener('click', () => {
+    const name = (ps.result && ps.result.missing_roles || [])[0];
+    openRoles().then(ok => { if (ok) { $('roleList').value = ''; fillRole(null); $('r-name').value = name || ''; $('r-instr').focus(); } });
+  });
+  $('psCopy').addEventListener('click', () => navigator.clipboard.writeText($('psText').value).then(() => { $('psState').textContent = t('ps.copied'); }).catch(() => {}));
+  $('psSave').addEventListener('click', async () => {
+    const r = ps.result || {}, name = $('psName').value.trim();
+    if (!name) return psErr([t('ps.err.name')]);
+    const body = { name, text: $('psText').value, tags: $('psTags').value.split(/[\s,]+/).filter(Boolean), mode: r.mode || ps.mode, lang: r.lang || $('ps-lang').value, target: r.target || ps.target,
+                   idea: r.idea || $('ps-idea').value.trim(), score: (r.lint || {}).score || 0, model: r.model || '', effort: r.effort || '' };
+    try { const s = await api('/api/prompts/library', body); psErr([]); $('psState').textContent = t('ps.saved', { name: s.saved, n: s.version }); loadLibrary(); }
+    catch (e) { psErr([e.message]); }
+  });
+  // Only a prompt generated for Uno is sent (the server checks it too); one generated for Claude
+  // Code is regenerated for Uno with the same inputs and answers, never sent as it is.
+  async function psSend(text, target, regenerate) {
+    const repo = $('repo').value.trim();
+    if (!repo) return psErr([t('err.noproject')]);
+    if (target !== 'uno') { if (regenerate && confirm(t('ps.send.regenerate'))) regenerate(); else psErr([t('ps.send.notUno')]); return; }
+    if (!confirm(t('ps.send.confirm'))) return;
+    try {
+      await api('/api/prompts/send', { text, target, repo, backend: $('backend').value, parallel: parseInt($('parallel').value, 10) || 0,
+                                       max_iterations: parseInt($('iters').value, 10) || 0, ...runSettings() });
+      psErr([]); setTab('orchestra'); refreshPipeline();
+    } catch (e) { psErr([e.message]); }
+  }
+  $('psSend').addEventListener('click', () => {
+    const r = ps.result || {};
+    psSend($('psText').value, r.target, () => {
+      setTarget('uno');
+      if (ps.last) psGenerate(ps.last.answers || [], { ...ps.last, target: 'uno', confirm_override_only: undefined });
+      else psStart();
+    });
+  });
+
+  // library: versions, tags, search; the diff between two versions is computed by the server.
+  let libTimer = null;
+  async function loadLibrary() {
+    const q = $('psSearch').value.trim(), mode = $('psLibMode').value;
+    try { ps.lib = (await api('/api/prompts/library?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode))).entries || []; }
+    catch (e) { psErr([e.message]); return; }
+    renderLibrary();
+  }
+  function renderLibrary() {
+    const box = $('psLibList'); clear(box);
+    $('psLibCount').textContent = t('ps.lib.count', { n: ps.lib.length });
+    if (!ps.lib.length) box.appendChild(el('div', 'empty', t('ps.lib.empty')));
+    ps.lib.forEach(e => {
+      const row = el('div', 'librow' + (ps.entry && ps.entry.name === e.name ? ' current' : ''));
+      const head = el('div', 'head');
+      head.appendChild(el('b', '', e.name)); head.appendChild(el('span', 'hint', `v${e.version} · ${t('ps.mode.' + e.mode)} · ${t('ps.target.' + (e.target || 'claude-code'))} · ${e.lang}`));
+      const sc = el('span', 'badge ' + (e.score >= 80 ? 'ok' : e.score >= 50 ? 'warn' : 'bad'), String(e.score)); head.appendChild(sc);
+      (e.tags || []).forEach(tag => head.appendChild(el('span', 'tag', tag)));
+      row.appendChild(head);
+      row.appendChild(el('div', 'hint idea', e.idea || ''));
+      const acts = el('div', 'row');
+      const open = el('button', 'ghost small', t('ps.lib.open')); open.type = 'button'; open.addEventListener('click', () => openEntry(e.name)); acts.appendChild(open);
+      const send = el('button', 'ghost small', t('ps.send')); send.type = 'button'; send.addEventListener('click', async () => { try { const en = await api('/api/prompts/library?name=' + encodeURIComponent(e.name)); psSend(en.text, en.target, () => { ps.mode = en.mode; $('ps-idea').value = en.idea || ''; setTarget('uno'); renderModes(); psStart(); }); } catch (x) { psErr([x.message]); } }); acts.appendChild(send);
+      const del = el('button', 'ghost small', t('ps.lib.delete')); del.type = 'button';
+      del.addEventListener('click', async () => { if (!confirm(t('ps.lib.confirmDelete', { name: e.name }))) return; try { await api('/api/prompts/library/delete', { name: e.name }); if (ps.entry && ps.entry.name === e.name) ps.entry = null; loadLibrary(); } catch (x) { psErr([x.message]); } });
+      acts.appendChild(del); row.appendChild(acts); box.appendChild(row);
+    });
+    const e = ps.entry; [$('psCmpA'), $('psCmpB')].forEach((sel, i) => {
+      const cur = sel.value; clear(sel);
+      (e ? e.versions : []).forEach(v => sel.appendChild(el('option', '', `${e.name} v${v}`)).value = String(v));
+      sel.value = [...sel.options].some(o => o.value === cur) ? cur : (e ? String(e.versions[i === 0 ? Math.max(0, e.versions.length - 2) : e.versions.length - 1]) : '');
+    });
+    $('psCompare').disabled = !e || e.versions.length < 2;
+  }
+  async function openEntry(name, version) {
+    try {
+      const e = await api('/api/prompts/library?name=' + encodeURIComponent(name) + (version ? '&version=' + version : ''));
+      const lint = await api('/api/prompts/lint', { text: e.text, target: e.target });
+      ps.entry = e; ps.result = { text: e.text, lint, mode: e.mode, lang: e.lang, target: e.target, model: e.model, effort: e.effort, assumptions: [], open_questions: [], missing_roles: [], idea: e.idea, template: `v${e.version}` };
+      renderResult(ps.result); $('psName').value = e.name; $('psTags').value = (e.tags || []).join(' '); renderLibrary(); psErr([]);
+    } catch (x) { psErr([x.message]); }
+  }
+  $('psCompare').addEventListener('click', async () => {
+    const e = ps.entry; if (!e) return;
+    try {
+      const r = await api('/api/prompts/diff', { name: e.name, a: parseInt($('psCmpA').value, 10), b: parseInt($('psCmpB').value, 10) });
+      const d = $('psCmpDiff'); clear(d); d.appendChild(diffPre(r.diff || t('ps.lib.same')));
+    } catch (x) { psErr([x.message]); }
+  });
+  $('psSearch').addEventListener('input', () => { clearTimeout(libTimer); libTimer = setTimeout(loadLibrary, 300); });
+  $('psLibMode').addEventListener('change', loadLibrary);
+
   // --- brand: PNGs served from outside the repository, or the neutral mark -----------------
   function brand(on) {
     document.body.classList.toggle('branded', !!on);
@@ -665,6 +903,8 @@
     setConn(conn.className.includes('live') ? 'live' : conn.className.includes('bad') ? 'offline' : 'idle');
     if (lastResults) renderResults(lastResults);
     if (noticeKey) notice(noticeKey);
+    renderRoles();
+    renderStudio();
   }
 
   // --- boot --------------------------------------------------------------------------------
@@ -685,6 +925,7 @@
     updateGithub();
     runCheck();
     fillRole(null); loadRoles(); refreshPipeline();
+    setTab(fragPref('tab') === 'prompts' ? 'prompts' : 'orchestra');
   }
   boot();
 })();

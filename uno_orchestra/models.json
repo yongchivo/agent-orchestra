@@ -46,6 +46,7 @@
   },
   "role_defaults": {
     "planner": "balanced",
+    "prompt-studio": "balanced",
     "security-analyst": "max",
     "architect": "balanced",
     "developer": "balanced",
