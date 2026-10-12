@@ -386,14 +386,14 @@ def test_wheel_installs_in_a_clean_venv_and_serves_the_ui(tmp_path):
     dist = tmp_path / "dist"
     subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "-q", "-w", str(dist), str(ROOT)],
                    check=True, cwd=tmp_path, timeout=600)
-    wheel, = dist.glob("uno_orchestra-0.1.0-*.whl")
+    wheel, = dist.glob("uno_orchestra-0.2.0-*.whl")
     venv = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, timeout=120)
     pip = venv / "bin" / "pip"
     subprocess.run([str(pip), "install", "-q", "--no-deps", str(wheel)], check=True, cwd=tmp_path, timeout=300)
     uno = venv / "bin" / "uno"
     out = subprocess.run([str(uno), "--version"], capture_output=True, text=True, check=True, cwd=tmp_path)
-    assert out.stdout.strip() == "uno 0.1.0"
+    assert out.stdout.strip() == "uno 0.2.0"
     where = subprocess.run([str(venv / "bin" / "python"), "-c", "import uno_orchestra; print(uno_orchestra.__file__)"],
                            capture_output=True, text=True, check=True, cwd=tmp_path).stdout
     assert "site-packages" in where                          # the installed copy, not the checkout
@@ -436,7 +436,7 @@ def test_cli_defaults_to_ui_and_has_help_per_subcommand(capsys):
         assert exc.value.code == 0 and "usage: uno" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         cli.main(["--version"])
-    assert capsys.readouterr().out.strip() == "uno 0.1.0"
+    assert capsys.readouterr().out.strip() == "uno 0.2.0"
     parser = cli.build_parser()
     assert parser.parse_args(["ui", "--no-browser"]).cmd == "ui"
     assert cli.main.__module__ == "uno_orchestra.cli"
@@ -693,7 +693,7 @@ def test_api_key_is_ignored_unless_configured(tmp_path, repo, monkeypatch, capsy
     state_dir = tmp_path / "s"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key-000000")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://proxy.local")
-    assert config.load(state_dir) == {"auth": "account"}                    # no file yet: default
+    assert config.load(state_dir) == {"auth": "account", "planner_model": "sonnet", "planner_effort": "high"}                    # no file yet: default
     # account mode: the planner and the workers never see the key and never run --bare
     cmd = pipeline.planner_command("r", "s")
     assert "--bare" not in cmd and "ANTHROPIC_API_KEY" not in pipeline.agent_env()
@@ -719,7 +719,7 @@ def test_api_key_is_ignored_unless_configured(tmp_path, repo, monkeypatch, capsy
         assert cli.main(["config", "set", "auth", "api-key", "--state-dir", str(state_dir)]) == 0
         assert "auth = api-key" in capsys.readouterr().out
         assert stat.S_IMODE((state_dir / "config.json").stat().st_mode) == 0o600
-        assert json.loads((state_dir / "config.json").read_text()) == {"auth": "api-key"}
+        assert json.loads((state_dir / "config.json").read_text()) == {"auth": "api-key", "planner_model": "sonnet", "planner_effort": "high"}
         assert cli.main(["config", "get", "auth", "--state-dir", str(state_dir)]) == 0 and capsys.readouterr().out.strip() == "api-key"
         asyncio.run(orchestrator.run(repo, [Task("a", "p", ["**"])], EventBus(tmp_path / "e2.jsonl"),
                                      backend="mock", state_dir=state_dir))

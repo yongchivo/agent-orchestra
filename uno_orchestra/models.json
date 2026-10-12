@@ -1,0 +1,58 @@
+{
+  "_comment": "The only place that lists models, effort levels and the simple-mode profiles. Verified against Claude Code 2.1.296 (`claude --help`: --model <alias|full name>, --effort low|medium|high|xhigh|max) and against this account's login on 2026-10-12: fable, opus, sonnet and haiku all answered. Policy: opus is the maximum for roles, agents and the planner; models in override_only (fable) can never be saved in a role, a template or the settings and are never a default: they exist only as a per-run override chosen in the UI, which asks for an explicit confirmation. Edit this file when the CLI or the subscription changes; the server rejects anything not listed here.",
+  "cli_verified": "2.1.296",
+  "models": [
+    {
+      "id": "fable",
+      "full": "claude-fable-5-1",
+      "label": "Fable 5.1"
+    },
+    {
+      "id": "opus",
+      "full": "claude-opus-5-5",
+      "label": "Opus 5.5"
+    },
+    {
+      "id": "sonnet",
+      "full": "claude-sonnet-5-5",
+      "label": "Sonnet 5.5"
+    },
+    {
+      "id": "haiku",
+      "full": "claude-haiku-5-5",
+      "label": "Haiku 5.5"
+    }
+  ],
+  "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "profiles": {
+    "fast": {
+      "model": "haiku",
+      "effort": "medium"
+    },
+    "balanced": {
+      "model": "sonnet",
+      "effort": "high"
+    },
+    "max": {
+      "model": "opus",
+      "effort": "max"
+    }
+  },
+  "role_defaults": {
+    "planner": "balanced",
+    "security-analyst": "max",
+    "architect": "balanced",
+    "developer": "balanced",
+    "tester": "fast",
+    "*": "balanced"
+  },
+  "override_only": [
+    "fable"
+  ]
+}

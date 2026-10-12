@@ -143,7 +143,7 @@ def cmd_ui(args, state_dir):
     token = secrets.token_urlsafe(32)
     write_token(state_dir, token)
     srv = UIServer(args.host, args.port, token, state_dir, roots, args.idle_timeout, args.agent_timeout)
-    if here:
+    if here and any(here == r or here.is_relative_to(r) for r in srv.allowed_roots):
         srv.remember_repo(here)   # the page pre-selects the most recent repository
     url = f"http://{args.host}:{srv.server_port}/#token={token}"
     print(f"Uno UI: {url}", flush=True)

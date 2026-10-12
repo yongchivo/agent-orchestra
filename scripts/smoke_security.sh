@@ -50,17 +50,24 @@ check "security headers on 404 error"               ok  "$(headers_present "$BAS
 check "security headers on 501 error (PUT)"         ok  "$(headers_present -X PUT "$BASE/api/status")"
 check "CSP forbids inline script"                   1   "$(curl -s -D - -o /dev/null "$BASE/" | grep -ci "script-src 'self'")"
 check "unlisted file is not served -> 404"          404 "$(code "$BASE/server.py")"
+check "i18n dictionary is served -> 200"            200 "$(code "$BASE/i18n/es.json")"
+check "unlisted i18n file -> 404"                   404 "$(code "$BASE/i18n/fr.json")"
+check "brand file outside the allowlist -> 404"     404 "$(code "$BASE/brand/uno-mark-1024.png")"
+check "brand path traversal -> 404"                 404 "$(code --path-as-is "$BASE/brand/../token")"
+check "brand route is PNG or 404"                   ok  "$(c="$(code "$BASE/brand/favicon.png")"; if [ "$c" = 404 ]; then echo ok; else curl -s -D - -o /dev/null "$BASE/brand/favicon.png" | grep -qi '^Content-Type: image/png' && echo ok || echo "not png ($c)"; fi)"
 
 # GET/HEAD must never modify state: fingerprint the state dir, sweep every endpoint, compare.
 fingerprint() { find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l 2>/dev/null | md5 2>/dev/null || find "$STATE_DIR" -type f -print0 | sort -z | xargs -0 ls -l | md5sum; }
 BEFORE="$(fingerprint)"
 for m in GET HEAD; do
   for p in /api/start /api/stop /api/branch /api/check "/api/start?repo=/tmp/x" "/api/branch?repo=/tmp/x&name=evil" \
-           /api/chat "/api/chat?repo=/tmp/x&message=hi" /api/pipeline/approve /api/pipeline/merge /api/roles/delete "/api/roles/commit?repo=/tmp/x"; do
+           /api/chat "/api/chat?repo=/tmp/x&message=hi" /api/pipeline/approve /api/pipeline/merge /api/roles/delete "/api/roles/commit?repo=/tmp/x" \
+           "/api/roles/rename?repo=/tmp/x&name=a&new_name=b" "/api/roles/from-template?repo=/tmp/x&template=developer" "/api/role-templates/delete?name=developer"; do
     if [ "$m" = HEAD ]; then c="$(code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; else c="$(code -H "X-Orchestra-Token: $TOKEN" "$BASE$p")"; fi
     check "$m $p is not an action -> 404" 404 "$c"
   done
-  for p in / /app.js /style.css /api/status /api/results /api/templates "/api/events?from=0" /api/pipeline "/api/roles?repo=/tmp/x"; do
+  for p in / /app.js /style.css /i18n/es.json /i18n/en.json /brand/lockup.png /brand/mark.png /brand/favicon.png /brand/apple-touch.png \
+           /api/status /api/results /api/templates /api/role-templates "/api/events?from=0" /api/pipeline "/api/roles?repo=/tmp/x"; do
     if [ "$m" = HEAD ]; then code -I -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; else curl -s -m 3 -H "X-Orchestra-Token: $TOKEN" "$BASE$p" > /dev/null; fi
   done
 done

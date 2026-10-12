@@ -4,8 +4,10 @@ Single user, loopback only. The server enforces every rule and the page only dis
 them: a random per-start token in a header on every API call (never a cookie or query
 string), Host and Origin validation, JSON-only POST bodies with a size cap, repositories
 restricted to allowed roots, permission presets only, no inline scripts, and automatic
-shutdown after a period of inactivity. The core (orchestra/) is invoked as it is; nothing
-here relaxes a control.
+shutdown after a period of inactivity. Static files (page, script, style, i18n dictionaries)
+come from an allowlist; brand images come from four fixed routes mapped to fixed PNG files
+under <state-dir>/theme/ (signature and size checked, 404 otherwise). The core (orchestra/)
+is invoked as it is; nothing here relaxes a control.
 """
 import asyncio
 import datetime
@@ -21,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from uno_orchestra import config, orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra import __version__, config, models, orchestrator, pipeline, roles as roles_mod, scope, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
@@ -29,7 +31,21 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/i18n/es.json": ("i18n/es.json", "application/json"),
+    "/i18n/en.json": ("i18n/en.json", "application/json"),
 }
+# Brand images live OUTSIDE the repository (<state-dir>/theme/uno-brand/png/): the package is
+# MIT, the brand is not. Fixed routes to fixed file names, PNG only (signature checked), size
+# capped; anything else is 404 and the page falls back to its neutral mark.
+BRAND_DIR = Path("theme") / "uno-brand" / "png"
+BRAND = {
+    "/brand/lockup.png": "uno-lockup-horizontal-transparent.png",
+    "/brand/mark.png": "uno-mark-512.png",
+    "/brand/favicon.png": "uno-favicon-32.png",
+    "/brand/apple-touch.png": "uno-apple-touch-180.png",
+}
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_BRAND = 1024 * 1024
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
        "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 TOKEN_HEADER = "X-Orchestra-Token"
@@ -37,7 +53,7 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_BODY = 64 * 1024
 MAX_DIFF = 200 * 1024
 BACKENDS = ("mock", "claude")
-TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns", "output"}
+TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns", "output", "model", "effort"}
 MAX_CHAT = 4000
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$")
 RECENT_MAX = 10
@@ -79,7 +95,8 @@ def parse_tasks(raw):
                 raise ValueError(f"task {i}: '{key}' is required")
         tasks.append(Task(str(t["name"]), str(t["prompt"]), t["paths"],
                           str(t.get("preset", "edit")), t.get("max_turns", 20),
-                          output=str(t.get("output", "text"))))
+                          output=str(t.get("output", "text")),
+                          model=t.get("model"), effort=t.get("effort")))
     if len({t.name for t in tasks}) != len(tasks):
         raise ValueError("task names must be unique")
     return tasks
@@ -107,6 +124,24 @@ def advise(tasks, backend):
         if any(t.max_turns > 20 for t in tasks):
             warnings.append("start small: max_turns above 20 on the claude backend")
     return warnings
+
+
+def brand_asset(state_dir, route):
+    """Bytes of one allow-listed brand PNG, or None (missing, not a regular file inside the brand
+    directory, too big, or not a PNG by signature: an SVG renamed .png is refused)."""
+    name = BRAND.get(route)
+    if name is None:
+        return None
+    root = (Path(state_dir) / BRAND_DIR).resolve()
+    path = root / name
+    try:
+        real = path.resolve(strict=True)
+        if not real.is_relative_to(root) or not real.is_file() or real.stat().st_size > MAX_BRAND:
+            return None
+        data = real.read_bytes()
+    except OSError:
+        return None
+    return data if data[:8] == PNG_MAGIC and data[12:16] == b"IHDR" else None
 
 
 def write_token(state_dir, token):
@@ -152,6 +187,8 @@ class Chat:
         self.offset = 0
         self.history = []            # pipeline.state_summary() per finished run, for re-planning
         self.fingerprint = None      # the .uno/ snapshot the loaded roles came from
+        self.overrides = {}          # {role: {model, effort}} for this session's runs only
+        self.planner = None          # (model, effort) for the planner: settings, or this session's choice
 
     def say(self, who, text):
         self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
@@ -198,9 +235,17 @@ class Chat:
         roles, context, fp = roles_mod.load_confirmed(repo, self.srv.state_dir)
         if not roles:
             raise ValueError("the repository has no roles: install the templates or create one first")
+        overrides = pipeline.check_overrides(body.get("overrides"), roles)
+        cfg = config.load(self.srv.state_dir)
+        planner = body.get("planner") or {}
+        if not isinstance(planner, dict) or set(planner) - {"model", "effort"}:
+            raise ValueError("planner: only 'model' and 'effort' are allowed")
+        planner = (planner.get("model", cfg["planner_model"]), planner.get("effort", cfg["planner_effort"]))
+        models.check(*planner, override=True)   # chosen for this request only; config.py never accepts fable
         self.__init__(self.srv)
         self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
         self.roles, self.project_context, self.fingerprint = roles, context, fp
+        self.overrides, self.planner = overrides, planner
         self.srv.remember_repo(repo)
 
     def _plan(self, request):
@@ -210,8 +255,12 @@ class Chat:
             try:
                 raw = pipeline.propose(request, self.roles, self.project_context, self.backend,
                                        self.transcript[:-1], history, rejected, cwd=str(self.srv.state_dir),
-                                       auth=config.auth_mode(self.srv.state_dir))
+                                       auth=config.auth_mode(self.srv.state_dir),
+                                       model=self.planner[0], effort=self.planner[1])
                 summary, steps = pipeline.validate_plan(raw, self.roles)
+                for st in steps:   # effective model/effort, shown in the plan before approval
+                    o = self.overrides.get(st.role, {})
+                    st.model, st.effort = o.get("model", self.roles[st.role].model), o.get("effort", self.roles[st.role].effort)
             except pipeline.PlanError as exc:
                 rejected = str(exc)
                 continue
@@ -229,11 +278,15 @@ class Chat:
         self.state = "review" if self.branch else "idle"
 
     # -- controls
-    def approve(self):
+    def approve(self, body=None):
         if self.state != "proposed":
             return 409, {"error": "there is no plan waiting for approval"}
         if self.srv.running():
             return 409, {"error": "a run is already in progress"}
+        special = pipeline.uses_override_only(self.plan[1])
+        if special and not ((body or {}).get("confirm_override_only") is True):
+            return 409, {"error": "this plan uses Fable (billed outside your normal limit): confirm it explicitly",
+                         "code": "confirm_override_only", "steps": special}
         # .uno/ may have changed on disk since the roles were loaded: the run uses the
         # loaded roles, so it must still be exactly the confirmed snapshot.
         if (roles_mod.fingerprint(self.repo) != self.fingerprint
@@ -248,7 +301,7 @@ class Chat:
             max_parallel=self.parallel, max_iterations=self.max_iterations,
             timeout=self.srv.agent_timeout, state_dir=self.srv.state_dir,
             project_context=self.project_context, base_ref=self.branch or "HEAD", base=self.base,
-            on_question=lambda q: self._question(q))
+            on_question=lambda q: self._question(q), overrides=self.overrides)
         self.loop = asyncio.new_event_loop()
         self.task = self.loop.create_task(self.engine.run())
         self.state = "running"
@@ -350,11 +403,15 @@ class Chat:
         out = {"state": self.state, "transcript": self.transcript, "plan": plan,
                "repo": str(self.repo) if self.repo else None, "backend": self.backend,
                "branch": self.branch, "offset": self.offset, "error": self.error,
-               "max_iterations": self.max_iterations,
+               "max_iterations": self.max_iterations, "overrides": self.overrides,
+               "planner": {"model": self.planner[0], "effort": self.planner[1]} if self.planner else None,
                "limits": {"steps": pipeline.MAX_STEPS, "iterations": pipeline.MAX_ITERATIONS,
                           "duration": pipeline.MAX_DURATION}}
         if self.engine:
             out["iterations"] = self.engine.iterations
+        if self.plan:
+            out["override_only_steps"] = pipeline.uses_override_only(self.engine.steps if self.engine else self.plan[1])
+            out["planner_override_only"] = models.is_override_only(self.planner[0]) if self.planner else False
         if self.state in ("review", "merged") and self.branch:
             out["diff"] = pipeline.consolidated_diff(self.repo, self.base, self.branch, MAX_DIFF)
             out["pending_findings"] = (self.result or {}).get("pending_findings", [])
@@ -403,6 +460,13 @@ class UIServer(ThreadingHTTPServer):
             return json.loads((self.state_dir / "recent-repos.json").read_text())
         except (OSError, ValueError):
             return []
+
+    def configured(self):
+        """Recent repositories that have a .uno/ directory (the project selector)."""
+        return [r for r in self.recent_repos() if (Path(r) / roles_mod.DIR).is_dir()]
+
+    def brand(self):
+        return all(brand_asset(self.state_dir, route) is not None for route in BRAND)
 
     def remember_repo(self, repo):
         recent = [str(repo)] + [r for r in self.recent_repos() if r != str(repo)]
@@ -524,6 +588,10 @@ class UIServer(ThreadingHTTPServer):
                          and e["kind"] in ("merge", "conflict", "out_of_scope", "needs_review")), None)
             failed = next((e for e in reversed(events) if e.get("source") == t.name and e["kind"] == "failed"), None)
             detail = (failed or gate or {}).get("message", "")
+            ended = next((e for e in reversed(events) if e.get("source") == t.name and e["kind"] in ("done", "failed")), {})
+            usage = {k: ended.get(k) for k in ("model", "effort", "model_used", "turns", "seconds")}
+            usage["model"], usage["effort"] = t.model, t.effort
+            usage["override_only"] = models.is_override_only(t.model)
             branch = f"agent/{run_id}/{t.name}" if run_id else None
             diff, commands = "", []
             if branch and worktree.git(repo, "rev-parse", "--verify", "-q", branch, check=False).returncode == 0:
@@ -533,7 +601,8 @@ class UIServer(ThreadingHTTPServer):
                     commands = [f"git -C {repo} diff {run['base'][:12]} {branch}",
                                 f"git -C {repo} merge --no-ff {branch}"]
             agents.append({"name": t.name, "verdict": verdict, "detail": detail, "paths": t.paths,
-                           "preset": t.preset, "branch": branch, "diff": diff, "commands": commands})
+                           "preset": t.preset, "branch": branch, "diff": diff, "commands": commands,
+                           "usage": usage})
         return {"run_id": run_id, "repo": str(repo), "branch": run["branch"], "backend": run["backend"],
                 "base": run["base"], "error": run["error"], "summary": run["summary"],
                 "steering": run["steering"], "agents": agents,
@@ -545,6 +614,8 @@ class UIServer(ThreadingHTTPServer):
         if not isinstance(name, str) or not NAME_RE.match(name):
             raise ValueError("invalid template name: use a-z, 0-9 and '-'")
         tasks = parse_tasks(body.get("tasks"))
+        for t in tasks:
+            models.check(t.model, t.effort)   # a saved template is not "one run": override-only models are refused
         backend = body.get("backend", "mock")
         if backend not in BACKENDS:
             raise ValueError("invalid backend")
@@ -580,7 +651,16 @@ class UIServer(ThreadingHTTPServer):
         if error is None and roles_mod.has_legacy_dir(repo):
             error = (f"this repository has a pre-0.1.0 {roles_mod.LEGACY_DIR}/: run `uno init` inside it "
                      f"to rename it to {roles_mod.DIR}/ (roles are read from {roles_mod.DIR}/ only)")
+        ref = worktree.git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).stdout.strip()
+        try:
+            worktree.preflight(repo)
+            preflight = None
+        except RuntimeError as exc:
+            preflight = str(exc)
         return {"roles": [asdict(r) for r in roles.values()], "project_context": context,
+                "library": [{"name": n, "builtin": b, "description": r.description, "preset": r.preset}
+                            for n, (r, b) in roles_mod.library(self.state_dir).items()],
+                "max_roles": roles_mod.MAX_ROLES, "branch": ref or None, "on_main": ref in ("main", "master"), "preflight": preflight,
                 "protected_paths": protected, "truncated": truncated, "references": references, "error": error, "presets": sorted(PRESETS), "outputs": list(OUTPUTS),
                 "templates": [t.name for t in roles_mod.TEMPLATES if t.name not in roles],
                 "uncommitted": roles_mod.uncommitted(repo, worktree.git),
@@ -597,10 +677,52 @@ class UIServer(ThreadingHTTPServer):
         roles_mod.save_role(repo, role)
         return self._edited(repo)
 
+    def _role_in_use(self, repo, name):
+        """A role named in the chat's pending or running plan cannot be renamed or deleted
+        until that plan finishes or is cancelled."""
+        chat = self.chat
+        if chat.repo != repo or not chat.plan or chat.state not in ("proposed", "planning", *chat.ACTIVE):
+            return
+        steps = chat.engine.steps if chat.engine else chat.plan[1]
+        if any(s.role == name for s in steps):
+            raise ValueError(f"role {name!r} is used by the plan that is {chat.state}: "
+                             "wait for it to finish or cancel it first")
+
     def delete_role(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
-        roles_mod.delete_role(repo, str(body.get("name", "")))
+        name = str(body.get("name", ""))
+        self._role_in_use(repo, name)
+        roles_mod.delete_role(repo, name)
         return self._edited(repo)
+
+    def rename_role(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        old, new = str(body.get("name", "")), str(body.get("new_name", ""))
+        self._role_in_use(repo, old)
+        roles_mod.rename_role(repo, old, new)
+        return self._edited(repo)
+
+    def role_from_template(self, body):
+        repo = validate_repo(body.get("repo"), self.allowed_roots)
+        name = body.get("name")
+        role = roles_mod.role_from_template(self.state_dir, str(body.get("template", "")),
+                                            str(name) if name else None)
+        if (roles_mod.roles_dir(repo) / f"{role.name}.json").exists():
+            raise ValueError(f"a role named {role.name!r} already exists: give it another name")
+        roles_mod.save_role(repo, role)
+        return self._edited(repo)
+
+    # -- personal template library (state dir, outside any repository)
+    def role_templates_view(self):
+        return {"library": [dict(asdict(r), builtin=b) for r, b in roles_mod.library(self.state_dir).values()]}
+
+    def save_role_template(self, body):
+        roles_mod.save_template(self.state_dir, roles_mod.role_from_json(body.get("role")))
+        return self.role_templates_view()
+
+    def delete_role_template(self, body):
+        roles_mod.delete_template(self.state_dir, str(body.get("name", "")))
+        return self.role_templates_view()
 
     def install_templates(self, body):
         repo = validate_repo(body.get("repo"), self.allowed_roots)
@@ -712,16 +834,22 @@ class Handler(BaseHTTPRequestHandler):
             name, ctype = STATIC[path]
             return self._send(200, ctype, resources.files(__package__).joinpath(name).read_bytes())
         srv = self.server
+        if path in BRAND:
+            data = brand_asset(srv.state_dir, path)
+            return self._send(200, "image/png", data) if data is not None else self._error(404, "not found")
         if path == "/api/status":
             run = srv.run
             return self._json(200, {
                 "running": srv.running(), "offset": run["offset"] if run else 0,
                 "has_results": bool(run and run.get("results")),
-                "recent_repos": srv.recent_repos(), "templates": srv.templates(),
+                "recent_repos": srv.recent_repos(), "configured": srv.configured(), "templates": srv.templates(),
+                "brand": srv.brand(), "version": __version__,
                 "presets": sorted(PRESETS), "limits": {"parallel": orchestrator.MAX_PARALLEL,
                                                         "tasks": orchestrator.MAX_TASKS},
                 "idle_timeout": srv.idle_timeout, "state_dir": str(srv.state_dir),
-                "auth": config.auth_mode(srv.state_dir)})
+                "auth": config.auth_mode(srv.state_dir), "models": models.catalog(),
+                "planner": {"model": config.load(srv.state_dir)["planner_model"],
+                            "effort": config.load(srv.state_dir)["planner_effort"]}})
         if path == "/api/results":
             run = srv.run
             if not run or not run.get("results"):
@@ -739,6 +867,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.roles_view(repo))
             except ValueError as exc:
                 return self._error(400, str(exc))
+        if path == "/api/role-templates":
+            return self._json(200, srv.role_templates_view())
         if path.startswith("/api/templates/"):
             try:
                 return self._json(200, srv.load_template(path[len("/api/templates/"):]))
@@ -786,6 +916,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, srv.save_role(body))
             if path == "/api/roles/delete":
                 return self._json(200, srv.delete_role(body))
+            if path == "/api/roles/rename":
+                return self._json(200, srv.rename_role(body))
+            if path == "/api/roles/from-template":
+                return self._json(200, srv.role_from_template(body))
+            if path == "/api/role-templates":
+                return self._json(200, srv.save_role_template(body))
+            if path == "/api/role-templates/delete":
+                return self._json(200, srv.delete_role_template(body))
             if path == "/api/roles/templates":
                 return self._json(200, srv.install_templates(body))
             if path == "/api/roles/commit":
@@ -799,7 +937,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(*srv.chat.message(body))
             if path.startswith("/api/pipeline/"):
                 action = path[len("/api/pipeline/"):]
-                if action in ("approve", "pause", "resume", "cancel", "merge", "discard"):
+                if action == "approve":
+                    with srv.lock:
+                        return self._json(*srv.chat.approve(body))
+                if action in ("pause", "resume", "cancel", "merge", "discard"):
                     with srv.lock:
                         return self._json(*getattr(srv.chat, action)())
         except (ValueError, RuntimeError) as exc:

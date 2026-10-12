@@ -12,9 +12,10 @@ import json
 import os
 import re
 import signal
+import time
 from dataclasses import dataclass
 
-from . import worktree
+from . import models, worktree
 from .bus import EventBus
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -105,11 +106,20 @@ class Task:
     preset: str = "edit"
     max_turns: int = 20
     output: str = "text"  # "findings": the agent must return FINDINGS_SCHEMA (pipeline reviewers)
+    model: str = None     # None: the profile models.json assigns to this name (or to "*")
+    effort: str = None
 
     def __post_init__(self):
         # The name becomes a directory and a branch: validate it strictly.
         if not NAME_RE.match(self.name):
             raise ValueError(f"invalid task name {self.name!r}: use a-z, 0-9 and '-'")
+        default = models.default_for(self.name)
+        self.model = default[0] if self.model is None else self.model
+        self.effort = default[1] if self.effort is None else self.effort
+        try:
+            models.check(self.model, self.effort, override=True)   # a task is one run: the override may be set here
+        except ValueError as exc:
+            raise ValueError(f"task {self.name!r}: {exc}") from exc
         if self.preset not in PRESETS:
             raise ValueError(f"unknown preset {self.preset!r}: use one of {sorted(PRESETS)}")
         if (not isinstance(self.paths, list) or not self.paths
@@ -143,6 +153,9 @@ class Worker:
         self.proc = None
         self.output = None   # final text, or the structured output of a "findings" task
         self.round = 1       # correction round in pipeline mode (the mock reviewer uses it)
+        self.model_used = None   # what the CLI reports it ran (never assumed from the request)
+        self.turns = 0
+        self.seconds = None
 
     @property
     def name(self):
@@ -152,25 +165,41 @@ class Worker:
         self.progress = max(self.progress, min(100, int(pct)))
         self.bus.emit(self.name, "progress", f"{self.progress}%", progress=self.progress)
 
+    def usage(self):
+        """What ran, for the bus and the results: requested model/effort, the model the CLI
+        reported, turns and wall-clock seconds."""
+        return {"model": self.task.model, "effort": self.task.effort, "model_used": self.model_used,
+                "turns": self.turns, "seconds": self.seconds,
+                "override_only": models.is_override_only(self.task.model)}   # e.g. fable: marked in every event
+
     async def run(self):
         self.status = "running"
+        started = time.monotonic()
         self.bus.emit(self.name, "start", self.task.prompt[:120], target="orchestrator",
-                      branch=self.branch)
+                      branch=self.branch, model=self.task.model, effort=self.task.effort,
+                      override_only=models.is_override_only(self.task.model))
         try:
             backend = self._run_mock() if self.backend == "mock" else self._run_claude()
             await asyncio.wait_for(backend, self.timeout)
+            self.seconds = round(time.monotonic() - started, 1)
             committed = worktree.commit_all(self.workdir, f"agent {self.name}: work in progress")
             self.status = "done"
             self._progress(100)
             self.bus.emit(self.name, "done", "finished", target="orchestrator",
-                          extra_commit=committed)
+                          extra_commit=committed, **self.usage())
         except asyncio.TimeoutError:
             self.status = "failed"
-            self.bus.emit(self.name, "failed", f"timeout after {self.timeout}s", target="orchestrator")
+            self.seconds = round(time.monotonic() - started, 1)
+            self.bus.emit(self.name, "failed", f"timeout after {self.timeout}s", target="orchestrator", **self.usage())
         except Exception as exc:  # noqa: BLE001 - report any failure to the bus
             self.status = "failed"
-            self.bus.emit(self.name, "failed", str(exc), target="orchestrator")
+            self.seconds = round(time.monotonic() - started, 1)
+            self.bus.emit(self.name, "failed", str(exc), target="orchestrator", **self.usage())
         return self.status
+
+    def _model_error(self):
+        return RuntimeError(f"model {self.task.model!r} is not available with this login (the CLI "
+                            f"rejected it); nothing ran. Choose one of {models.SAVEABLE} for this role.")
 
     async def _run_mock(self):
         import random
@@ -186,8 +215,10 @@ class Worker:
                 {"severity": "medium", "file": target, "line": 1,
                  "description": "mock finding: the new code does not validate its input",
                  "recommendation": "validate the input before using it"}]}
+            self.model_used, self.turns = f"mock:{self.task.model}", 2
             return
         steps = random.randint(4, 7)
+        self.model_used, self.turns = f"mock:{self.task.model}", steps
         for i in range(1, steps + 1):
             await asyncio.sleep(random.uniform(0.1, 0.4))
             self.bus.emit(self.name, "tool", f"Edit {self.name}/step{i}.txt", tool="Edit")
@@ -205,6 +236,8 @@ class Worker:
             "claude", "-p", self.task.prompt,
             "--output-format", "stream-json", "--verbose",
             "--max-turns", str(self.task.max_turns),
+            # Validated against models.json in Task; each value is its own argv element.
+            "--model", self.task.model, "--effort", self.task.effort,
             # No command/code tools or WebFetch, file tools confined to the worktree, and
             # user/project/local settings ignored (only managed settings and --settings load).
             "--restricted",
@@ -263,8 +296,11 @@ class Worker:
             except json.JSONDecodeError:
                 continue
             kind = msg.get("type")
+            if kind == "system" and msg.get("subtype") == "init" and msg.get("model"):
+                self.model_used = str(msg["model"])[:80]
             if kind == "assistant":
                 turns += 1
+                self.turns = turns
                 for block in msg.get("message", {}).get("content", []):
                     if block.get("type") == "text" and block["text"].strip():
                         self.bus.emit(self.name, "say", block["text"].strip()[:200])
@@ -274,10 +310,20 @@ class Worker:
                 # Real progress is unknowable; estimate from turns used (capped at 95%).
                 self._progress(min(95, 100 * turns / self.task.max_turns))
             elif kind == "result":
+                if isinstance(msg.get("num_turns"), int):
+                    self.turns = msg["num_turns"]
+                used = list((msg.get("modelUsage") or {}).keys())
+                if used:
+                    self.model_used = str(used[0])[:80]
                 if msg.get("is_error"):
-                    raise RuntimeError(msg.get("result", "agent reported an error"))
+                    text = str(msg.get("result", "agent reported an error"))
+                    if "selected model" in text or "unrecognized_model" in text:
+                        raise self._model_error()
+                    raise RuntimeError(text)
                 self.output = msg.get("structured_output", msg.get("result"))
         code = await proc.wait()
         if code != 0:
             err = (await proc.stderr.read()).decode(errors="replace").strip()
+            if "unrecognized_model" in err:
+                raise self._model_error()
             raise RuntimeError(f"claude exited with {code}: {err[:300]}")

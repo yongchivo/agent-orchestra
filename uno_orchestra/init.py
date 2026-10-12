@@ -297,8 +297,52 @@ def describe(role):
             f"paths {' '.join(role.paths)}, output {role.output}, max_turns {role.max_turns}")
 
 
-def review_roles(proposed, ask, say):
-    """Show each role; the user accepts it, edits its paths or removes it."""
+def ask_role(ask, say, names, name=None):
+    """A role from four plain questions: name, what it does, edit or read-only, paths."""
+    while True:
+        name = ask("    name (a-z, 0-9 and '-')", name or "").strip()
+        if name in names:
+            say(f"    a role named {name!r} already exists")
+            continue
+        what = ask("    what it does (instructions for the agent)", "").strip()
+        edit = yes(ask("    can it modify files? (no = read-only)", "y"))
+        paths = ask("    which folders it works in (space-separated globs)", "**").split()
+        try:
+            return Role(name=name, description=what[:roles_mod.MAX_TEXT["description"]], instructions=what,
+                        preset="edit" if edit else "readonly", paths=paths)
+        except ValueError as exc:
+            say(f"    {exc}")
+
+
+def add_roles(kept, ask, say, library):
+    """After the proposals: add a [n]ew role or one from the [t]emplate library, up to the limit."""
+    while len(kept) < roles_mod.MAX_ROLES:
+        answer = ask("Add a [n]ew role, add one from a [t]emplate, or [d]one?", "d").strip().lower()[:1]
+        names = {r.name for r in kept}
+        if answer == "n":
+            kept.append(ask_role(ask, say, names))
+        elif answer == "t":
+            say("Templates: " + ", ".join(f"{n}{'' if b else ' (yours)'}" for n, (_, b) in library.items()))
+            choice = ask("    template name", "").strip()
+            if choice not in library:
+                say("    no such template")
+                continue
+            role = library[choice][0]
+            if role.name in names:
+                role = Role(**{**role.__dict__, "name": ask("    that name is taken; name for the copy", f"{role.name}-2").strip()})
+                if role.name in names:
+                    say("    a role with that name already exists")
+                    continue
+            kept.append(role)
+        else:
+            break
+        say(describe(kept[-1]))
+    return kept
+
+
+def review_roles(proposed, ask, say, library=None):
+    """Show each role; the user accepts it, edits its paths or removes it. Then new roles or
+    roles from the template library can be added."""
     kept = []
     for role in proposed:
         say(describe(role))
@@ -316,6 +360,8 @@ def review_roles(proposed, ask, say):
                 say(f"    paths now {' '.join(role.paths)}")
             kept.append(role)
             break
+    if library:
+        kept = add_roles(kept, ask, say, library)
     return kept
 
 
@@ -408,7 +454,7 @@ def run(path, state_dir, ask=None, say=print, force=False):
     for w in warnings(repo, analysis):
         say(f"warning: {w}")
     say("Proposed roles:")
-    roles = review_roles(propose_roles(analysis), ask, say)
+    roles = review_roles(propose_roles(analysis), ask, say, roles_mod.library(state_dir))
     if not roles:
         say("No roles kept; nothing was written.")
         return 1

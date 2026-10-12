@@ -96,7 +96,7 @@ ignored. In `api-key` mode the agents also run with `--bare` (see Security contr
 | `uno run tasks.json [--repo .] [--backend claude\|mock] [--parallel 3]` | Parallel mode from the terminal; events go to `~/.uno-orchestra/events.jsonl` |
 | `uno doctor [PATH]` | One check per prerequisite with the fix for each failure; exit code 1 when any check fails |
 | `uno dashboard [--events FILE] [--port 8765]` | Live dashboard tailing the event log |
-| `uno config [get KEY \| set KEY VALUE]` | Settings in `~/.uno-orchestra/config.json` (0600). `auth`: `account` (default, the Claude CLI login) or `api-key` |
+| `uno config [get KEY \| set KEY VALUE]` | Settings in `~/.uno-orchestra/config.json` (0600). `auth`: `account` (default, the Claude CLI login) or `api-key`; `planner_model`, `planner_effort`: what the orchestrator's planner runs with |
 | `uno --version`, `uno <command> -h` | Version and per-command help |
 
 Every command takes `--state-dir DIR` (default `~/.uno-orchestra`).
@@ -206,9 +206,69 @@ uno ui                     # binds 127.0.0.1:8766, opens the browser with a one-
 The page is a thin client: every rule is checked by the server, the page only shows the
 result. It invokes the same core as the CLI and never relaxes a control.
 
-![New run form](docs/ui-form.jpg)
+![Simple mode](docs/ui-simple.jpg)
 
-**New run**: repository path (typed, with a list of recent repositories), backend, parallelism
+**Simple mode** (the default) is one flow: pick a project, tell the orchestrator what you want,
+watch the agents, approve the result. The header has the project selector (recent
+repositories; those with `.uno/` are marked as configured), the ES | EN and Simple | Advanced
+switches and the connection state. The left column is the chat with the orchestrator; on the
+right, **Live agents** (one node per agent with its role, status and last message, and pulses
+for every message between them) and **Review & approval** with an always-visible counter of
+pending items: the proposed plan (Approve / Reject) and, after a run, the reviewers' findings,
+the consolidated diff and Approve-and-merge / Reject. `Enter` sends; `Cmd/Ctrl+Enter` approves
+the pending item after a confirmation. The project state is written in plain language with the
+action to take ("The branch is main: [Create branch]", uncommitted changes, roles changed
+outside Uno, no `.uno/`), and a visible notice says when the token is missing or expired or
+the local server is gone. Switching modes only shows or hides panels: it never changes a
+permission or a limit (the server enforces them whatever the page sends).
+
+**Roles** (both modes): the header button opens the role editor. Create a role from scratch,
+by duplicating one or from a template, rename it, edit it, delete it, or save it as a template
+in your personal library (`~/.uno-orchestra/role-templates/`, outside any repository; the four
+built-in roles are always there). Simple mode asks four plain questions (name, what it does,
+can it modify files or only read, which folders); Advanced shows every field. A role used by a
+plan that is proposed or running cannot be renamed or deleted until the plan finishes or is
+cancelled. The rules do not move: names by the same regex, permissions only from the presets,
+validated paths, protected paths for every role, at most 12 roles per project, and what you
+change from the UI is confirmed in the fingerprint while edits made by hand in the repository
+still ask for confirmation. `uno init` offers the same: after the proposals, a [n]ew role or one
+from your [t]emplates.
+
+**Model and effort.** `uno_orchestra/models.json` is the single list of models, effort levels
+and profiles; edit it when the CLI or your subscription changes (it was verified against
+Claude Code 2.1.296, whose flags are `--model <alias|full name>` and `--effort
+low|medium|high|xhigh|max`, and against the account login: `fable`, `opus`, `sonnet`,
+`haiku`). Each role has its own `model` and `effort`; the planner's are `uno config set
+planner_model …` / `planner_effort …`. **Opus is the maximum** for every
+role, agent and the planner. In simple mode the role editor offers three profiles
+(⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = opus/max; defaults: planner
+Balanced, `security-analyst` Max, `architect` and `developer` Balanced, `tester` Fast).
+Advanced mode sets the exact pair per role and, next to the chat, an override for the next
+run only (nothing is written to the role). A note next to Approve warns when the plan uses
+Max profiles, which eat more of the subscription's limit.
+
+**Fable only when you choose it, per run.** `fable` is `override_only` in `models.json`: it is
+never a default (roles, planner, templates, `uno init`), a saved role or template with
+`model: fable` fails the schema (a repository file that carries it is reported as invalid and
+not loaded), the settings refuse it, and the planner's own output never picks a model (a
+`model` in a plan step is ignored; the code assigns each step's pair from the role and your
+overrides). It exists only as a per-run override in the UI: the "Fable for this run only"
+chips in simple mode, the override table in advanced. Approving a plan that uses it asks a
+separate confirmation ("This plan uses Fable, billed outside your normal limit. Continue?"),
+which the server enforces (`confirm_override_only: true`). No fallback or retry can switch
+to it, and every event and result marks when it was used. Every `start` event and every result
+records the model and effort requested, the model the CLI actually reported, the turns and
+the seconds, so runs can be compared. A model the CLI rejects is a clear error with the
+alternatives, never a silent switch. Model and effort only ever come from the allowlist and
+the enum, validated on the server, and reach the CLI as separate arguments.
+
+**Advanced mode** adds everything below: the parallel-run form, templates, the roles and
+project-context editor, the raw event log and the publish helper, plus backend, parallelism
+and correction rounds next to the chat.
+
+![Parallel run form (advanced mode)](docs/ui-form.jpg)
+
+**Parallel run** (advanced mode): the project selector or a typed path, backend, parallelism
 and a task editor where each task has a name, prompt, `max_turns`, a permission preset
 (`readonly` or `edit`, the core's presets, never free-text tools) and a required `paths` list.
 Templates are saved under `~/.uno-orchestra/runs/<name>.json` and validated with the same
@@ -223,12 +283,13 @@ schema when loaded. Before Start the server reports:
 
 ![Run in progress](docs/ui-running.jpg)
 
-**Run**: one card per agent with live progress and the message bus underneath, streamed with
-`fetch()` so the token travels in a header. Stop kills every agent's process group.
+**Run**: one node per agent in *Live agents* with its model, progress, status and last message,
+pulses for every message, and the raw event log in advanced mode, streamed with `fetch()` so
+the token travels in a header. Stop kills every agent's process group.
 
 ![Results](docs/ui-results.jpg)
 
-**Results**: per agent, the gate verdict (`merged`, `out_of_scope`, `needs_review`, `conflict`,
+**Results** (advanced mode): per agent, the gate verdict (`merged`, `out_of_scope`, `needs_review`, `conflict`,
 `failed`), the files and the reason, and the diff of its branch rendered as plain text. For
 anything the gate rejected there is no merge button, by design: the page shows the exact
 `git diff` and `git merge` commands to review and merge by hand. **Publish** opens
@@ -272,6 +333,12 @@ paste; the UI never pushes or runs `gh`.
 | State change through a link or prefetch | all actions are POST; GET/HEAD on action paths is 404 and leaves the state dir and the repository untouched | `test_get_and_head_never_modify_state` |
 | A response path that skips the headers | `HEAD` shares GET's routes; the base class's own errors are routed through the same sender | `test_head_matches_get_without_a_body`, `test_every_error_response_carries_security_headers` |
 | Runaway run | Stop kills process groups and cleans worktrees | `test_stop_cancels_the_run_and_cleans_up` |
+| A brand file that is not an image, too big, or outside the brand directory | fixed routes to fixed names, PNG signature, 1 MiB cap, regular file inside the directory, `image/png` + `nosniff`, 404 otherwise | `test_brand_pngs_are_served_only_from_the_allowlist`, `test_svg_or_oversized_brand_file_is_refused`, `test_without_a_brand_directory_the_ui_is_neutral` |
+| HTML in a translation, or the mode loosening a rule | dictionaries rendered with `textContent`; the mode is a CSS class, the server validates the same fields and limits | `test_i18n_dictionaries_are_static_and_rendered_as_text`, `test_simple_mode_is_a_css_class_and_changes_no_permission_or_limit` |
+| A role renamed or deleted under a running plan, too many roles, a tampered personal template | the server refuses while a plan using the role is proposed or running; 12 roles per project in the core; templates pass the same strict schema, invalid ones are skipped; built-ins cannot be deleted | `test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted`, `test_role_rename_duplicate_limit_and_protected_paths`, `test_personal_template_library` (`tests/test_pipeline.py`) |
+| Fable saved somewhere, used by default, or chosen by the model | `override_only` in `models.json`: the schema rejects it in roles, templates, run templates and settings; the planner's output cannot pick a model; approval needs an explicit flag | `test_fable_cannot_be_saved_in_a_role_a_repo_file_or_a_template`, `test_plan_without_override_never_uses_fable_and_fable_override_needs_confirmation`, `test_planner_output_never_chooses_a_model` |
+| Argument injection through the model or effort, or a silent model switch | both are an enum from `models.json`, validated in `Task`, `Role`, the overrides and the planner, passed as separate argv elements; a CLI rejection is reported as such | `test_model_and_effort_only_from_the_allowlist`, `test_run_override_leaves_the_role_untouched_and_is_recorded`, `test_unavailable_model_is_a_clear_error` (`tests/test_pipeline.py`) |
+| Token persisted by the page, or a weaker CSP | `localStorage` holds language, mode and project only; the CSP is asserted byte for byte | `test_localstorage_never_holds_the_token`, `test_csp_is_unchanged_or_stricter` |
 
 **Manual verification against a live server**
 
@@ -285,7 +352,7 @@ per check: no token → 401, token → 200, token in the query string → 401, f
 403, forged `Host` → 403, non-JSON POST → 415, `HEAD` → 200 without a body, the security
 headers on normal responses and on 401/403/404/501 errors, the inline-script ban in the CSP,
 an unlisted file → 404, forged `Origin` on GET and HEAD → 403, GET/HEAD on every action
-path → 404 with the state directory unchanged, and the token file mode. It exits non-zero if anything fails. Pass a
+path → 404 with the state directory unchanged, the i18n and brand routes (allow-listed only, PNG or 404), and the token file mode. It exits non-zero if anything fails. Pass a
 second argument to use another state directory.
 
 
@@ -634,6 +701,39 @@ Nothing reached the branch except the three lines in `text.py`; `calc.py` and `.
 untouched, and the worktrees were removed. Had the injected agent obeyed `NOTES.md`, the gate
 would still have stopped it: `calc.py` is outside its `paths` and `.github/` is protected. The
 model's refusal was a bonus, not the control. Total 41 s.
+
+## Personalization
+
+![Neutral theme without the brand directory: English, advanced mode](docs/ui-neutral.jpg)
+
+The UI has one theme (night-blue background, magenta → violet → sky-blue gradient, system
+fonts, nothing loaded from outside) and two languages, Spanish by default; the dictionaries
+are `uno_orchestra/ui/i18n/es.json` and `en.json`, shipped as package data and served from
+the static allowlist. Only the interface is translated; what the agents write is shown as it
+comes, and every string reaches the page through `textContent`, so HTML in a dictionary is
+displayed as text. Language, mode and the last project are kept in `localStorage`; the token
+never is.
+
+**Your own logo.** The repository ships a neutral mark (the inline SVG above). To use your
+own brand without putting it under this repository's MIT license, drop PNG files in
+`~/.uno-orchestra/theme/uno-brand/png/`:
+
+| File | Used as |
+|------|---------|
+| `uno-lockup-horizontal-transparent.png` | header (`/brand/lockup.png`) |
+| `uno-mark-512.png` | empty-state logo (`/brand/mark.png`) |
+| `uno-favicon-32.png` | favicon (`/brand/favicon.png`) |
+| `uno-apple-touch-180.png` | `apple-touch-icon` (`/brand/apple-touch.png`) |
+
+The four routes are fixed and map to fixed file names; nothing else in that directory is
+served. A file is served only if it is a regular file inside the directory (a symlink
+pointing outside is refused), at most 1 MiB, and a PNG by signature (an SVG renamed `.png` is
+refused), with `Content-Type: image/png` and `nosniff`; otherwise the route is 404 and the
+page keeps the neutral mark. If any of the four is missing or invalid, `/api/status` reports
+`brand: false` and the whole page stays neutral. The CSP is unchanged
+(`img-src 'self' data:`, no inline styles or scripts). Status colours (merged green, review
+amber, failed / out of scope red) are independent of the gradient, shown as icon + text, and
+meet WCAG AA on the background; `tests/test_ui.py` checks all of this.
 
 ## Development
 

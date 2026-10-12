@@ -1,4 +1,7 @@
-"""User settings in <state-dir>/config.json (0600). One key so far:
+"""User settings in <state-dir>/config.json (0600). Keys:
+
+  planner_model, planner_effort: what the orchestrator's planner runs with (allowlist in
+                  models.json; the UI can override them for one request).
 
   auth = account  (default) the Claude CLI's own login; ANTHROPIC_API_KEY in the environment is
                   NOT passed to the agents or the planner.
@@ -9,9 +12,12 @@ import json
 import os
 from pathlib import Path
 
+from . import models
+
 FILE = "config.json"
-CHOICES = {"auth": ("account", "api-key")}
-DEFAULTS = {"auth": "account"}
+CHOICES = {"auth": ("account", "api-key"), "planner_model": tuple(models.SAVEABLE), "planner_effort": tuple(models.EFFORTS)}
+DEFAULTS = {"auth": "account", "planner_model": models.default_for("planner")[0],
+            "planner_effort": models.default_for("planner")[1]}
 
 
 def load(state_dir):

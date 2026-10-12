@@ -4,6 +4,7 @@ import asyncio
 import http.client
 import json
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -620,3 +621,307 @@ def test_roles_context_and_fingerprint_come_from_one_snapshot(repo, tmp_path):
     files2 = dict(files, **{"roles/developer.json": files["roles/developer.json"].replace(b"Implements", b"Breaks")})
     assert roles_mod.fingerprint_of(files2) != fp and roles_mod.roles_from(files2)["developer"].description.startswith("Breaks")
     assert not roles_mod.trusted(repo, tmp_path / "state", files2)
+
+
+# --- phase 5: role management from both modes, template library, init prompts --------------
+
+def test_role_rename_duplicate_limit_and_protected_paths(ui, repo):
+    r = lambda name: {"name": name, "description": "d", "instructions": "i", "preset": "edit", "paths": ["**"]}
+    status, view = call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})
+    assert status == 200 and "coder" in [x["name"] for x in view["roles"]] and "developer" not in [x["name"] for x in view["roles"]]
+    assert view["trusted"] is True                                        # done from the UI: confirmed
+    assert not (repo / ".uno" / "roles" / "developer.json").exists() and (repo / ".uno" / "roles" / "coder.json").is_file()
+    for bad in ({"name": "coder", "new_name": "../x"}, {"name": "coder", "new_name": "architect"}, {"name": "nope", "new_name": "x"},
+                {"name": "coder", "new_name": "Bad Name"}):
+        assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), **bad})[0] == 400, bad
+    # Hard cap: 12 roles per project, enforced in the core (UI, init and templates all go through it).
+    for i in range(9):
+        assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": r(f"extra{i}")})[0] == 200
+    status, body = call(ui, "POST", "/api/roles", {"repo": str(repo), "role": r("one-too-many")})
+    assert status == 400 and "at most 12 roles" in body["error"]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "tester"})[0] == 400
+    assert len(roles_mod.load_roles(repo)) == 12
+    # Permissions still come from the presets only, and the global protected list applies to every role.
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), preset="shell")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), paths=[".uno/**"])})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r("extra0"), allowed_tools=["Bash"])})[0] == 400
+
+
+def test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted(ui, repo, monkeypatch):
+    async def slow(self):
+        await asyncio.sleep(1.5)
+    monkeypatch.setattr(Worker, "_run_mock", slow)
+    assert chat(ui, repo, "do the thing")[0] == 200
+    assert wait_state(ui, "proposed") == "proposed"
+    status, body = call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})
+    assert status == 400 and "used by the plan that is proposed" in body["error"]
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "developer"})[0] == 400
+    assert (repo / ".uno" / "roles" / "developer.json").is_file()
+    assert call(ui, "POST", "/api/pipeline/cancel", {})[0] == 200           # plan discarded -> allowed again
+    assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "developer", "new_name": "coder"})[0] == 200
+    assert call(ui, "POST", "/api/roles/rename", {"repo": str(repo), "name": "coder", "new_name": "developer"})[0] == 200
+    assert git(repo, "status", "--porcelain") == ""                        # renamed back: the tree is clean again
+    ui.chat.__init__(ui)
+    assert chat(ui, repo, "do the thing")[0] == 200 and wait_state(ui, "proposed") == "proposed"
+    assert call(ui, "POST", "/api/pipeline/approve", {})[0] == 200
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "developer"})[0] == 400  # running
+    wait_state(ui, "review", "idle")
+    assert call(ui, "POST", "/api/roles/delete", {"repo": str(repo), "name": "architect"})[0] == 200  # over: allowed
+
+
+def test_personal_template_library(ui, repo, tmp_path):
+    _, lib = call(ui, "GET", "/api/role-templates")
+    names = {x["name"]: x["builtin"] for x in lib["library"]}
+    assert names == {"developer": True, "security-analyst": True, "architect": True, "tester": True}
+    mine = {"name": "docs-writer", "description": "writes docs", "instructions": "Document the change in docs/.",
+            "preset": "edit", "paths": ["docs/**"], "output": "text", "output_format": "", "max_turns": 10}
+    status, lib = call(ui, "POST", "/api/role-templates", {"role": mine})
+    assert status == 200 and {x["name"]: x["builtin"] for x in lib["library"]}["docs-writer"] is False
+    path = ui.state_dir / "role-templates" / "docs-writer.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert not list(repo.rglob("docs-writer*"))                             # the library never touches the repository
+    assert call(ui, "POST", "/api/role-templates", {"role": dict(mine, tools=["Bash"])})[0] == 400
+    assert call(ui, "POST", "/api/role-templates", {"role": dict(mine, name="../evil")})[0] == 400
+    # Add from a template into the project, under its name or another one; the result is confirmed.
+    status, view = call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "docs-writer"})
+    assert status == 200 and "docs-writer" in [r["name"] for r in view["roles"]] and view["trusted"] is True
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "docs-writer"})[0] == 400  # exists
+    status, view = call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "tester", "name": "qa"})
+    assert status == 200 and roles_mod.load_roles(repo)["qa"].paths == ["tests/**", "test/**"]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "nope"})[0] == 400
+    # A tampered personal template is skipped, never loaded.
+    (ui.state_dir / "role-templates" / "evil.json").write_text('{"name": "evil", "description": "", "instructions": "", "preset": "edit", "paths": ["**"], "tools": ["Bash"]}')
+    assert "evil" not in [x["name"] for x in call(ui, "GET", "/api/role-templates")[1]["library"]]
+    assert call(ui, "POST", "/api/roles/from-template", {"repo": str(repo), "template": "evil"})[0] == 400
+    assert call(ui, "POST", "/api/role-templates/delete", {"name": "developer"})[0] == 400  # built-ins stay
+    assert call(ui, "POST", "/api/role-templates/delete", {"name": "docs-writer"})[0] == 200 and not path.exists()
+    _, view = call(ui, "GET", f"/api/roles?repo={repo}")
+    assert view["max_roles"] == 12 and [x["name"] for x in view["library"] if not x["builtin"]] == []
+
+
+def test_init_adds_a_new_role_and_one_from_the_library(tmp_path):
+    from uno_orchestra import init
+    state_dir = tmp_path / "state"
+    roles_mod.save_template(state_dir, roles_mod.Role(name="docs-writer", description="docs", instructions="Write docs.",
+                                                      preset="readonly", paths=["docs/**"]))
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    commit(repo, "init")
+    answers = iter(["n", "ops", "Keeps CI green.", "no", "ci/** .github/**",     # new role, read-only
+                    "t", "docs-writer",                                         # from my library
+                    "t", "developer", "dev-2",                                  # built-in whose name is taken -> copy
+                    "d"])
+    def ask(q, d):
+        return next(answers) if ("[n]ew role" in q or q.strip().startswith(("name", "what", "can it", "which folders", "template", "that name"))) else d
+    assert init.run(repo, state_dir, ask=ask, say=lambda *a: None) == 0
+    roles = roles_mod.load_roles(repo)
+    assert roles["ops"].preset == "readonly" and roles["ops"].paths == ["ci/**", ".github/**"] and roles["ops"].instructions == "Keeps CI green."
+    assert roles["docs-writer"].paths == ["docs/**"] and roles["dev-2"].instructions == roles["developer"].instructions
+    assert roles_mod.trusted(repo, state_dir)
+
+
+# --- phase 5: model and effort per role, per-run override, usage recorded ------------------
+
+def test_model_and_effort_only_from_the_allowlist(ui, repo, tmp_path):
+    from uno_orchestra import models
+    from uno_orchestra.worker import Task
+    assert models.MODELS == ["fable", "opus", "sonnet", "haiku"] and models.EFFORTS == ["low", "medium", "high", "xhigh", "max"]
+    assert models.default_for("security-analyst") == ("opus", "max") and models.default_for("tester") == ("haiku", "medium")
+    assert models.default_for("developer") == models.default_for("anything-else") == models.default_for("planner") == ("sonnet", "high")
+    assert models.OVERRIDE_ONLY == ["fable"] and models.SAVEABLE == ["opus", "sonnet", "haiku"]
+    for bad in ({"model": "gpt-4"}, {"model": "sonnet; rm -rf /"}, {"effort": "ultra"}, {"model": "--help"}, {"effort": ""}):
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            roles_mod.Role("a", "d", "i", "edit", ["**"], **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            Task("a", "p", ["**"], **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            pipeline.planner_command("hi", "sys", **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            pipeline.check_overrides({"developer": bad}, roles_mod.load_roles(repo))
+    # Each value is its own argv element, right after its flag: nothing is joined into a string.
+    cmd = Worker(Task("a", "p", ["**"], model="opus", effort="xhigh"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"),
+                 "claude", 10, tmp_path).command(env={})
+    assert cmd[cmd.index("--model") + 1] == "opus" and cmd[cmd.index("--effort") + 1] == "xhigh"
+    assert all(isinstance(a, str) and " " not in a for a in (cmd[cmd.index("--model") + 1], cmd[cmd.index("--effort") + 1]))
+    pc = pipeline.planner_command("hi", "sys", model="haiku", effort="low")
+    assert pc[pc.index("--model") + 1] == "haiku" and pc[pc.index("--effort") + 1] == "low" and "--fallback-model" not in pc
+    assert pipeline.planner_command("hi", "sys")[pipeline.planner_command("hi", "sys").index("--model") + 1] == "sonnet"
+    # The server rejects the same things, for roles, parallel tasks, overrides and the planner.
+    r = {"name": "x", "description": "d", "instructions": "i", "preset": "edit", "paths": ["**"]}
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, model="gpt-4")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, effort="ultra")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, model="haiku", effort="low")})[0] == 200
+    _, body = call(ui, "POST", "/api/check", {"repo": str(repo), "backend": "mock", "parallel": 1,
+                                              "tasks": [{"name": "a", "prompt": "p", "paths": ["**"], "model": "gpt-4"}]})
+    assert any("unknown model" in e for e in body["errors"])
+    assert chat(ui, repo, "hi", overrides={"developer": {"model": "gpt-4"}})[0] == 400
+    assert chat(ui, repo, "hi", overrides={"nope": {"model": "haiku"}})[0] == 400
+    assert chat(ui, repo, "hi", overrides={"developer": {"model": "haiku", "tools": ["Bash"]}})[0] == 400
+    assert chat(ui, repo, "hi", planner={"effort": "ultra"})[0] == 400
+    assert chat(ui, repo, "hi", planner={"model": "sonnet", "x": 1})[0] == 400
+    assert ui.chat.state == "idle"
+    _, status = call(ui, "GET", "/api/status")
+    assert status["models"]["cli_verified"] == "2.1.296" and status["planner"] == {"model": "sonnet", "effort": "high"}
+
+
+def test_run_override_leaves_the_role_untouched_and_is_recorded(ui, repo):
+    before = (repo / ".uno" / "roles" / "developer.json").read_text()
+    assert json.loads(before)["model"] == "sonnet" and json.loads(before)["effort"] == "high"
+    assert chat(ui, repo, "do the thing", overrides={"developer": {"model": "haiku", "effort": "low"}},
+                planner={"model": "sonnet", "effort": "medium"})[0] == 200
+    wait_state(ui, "proposed")
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    sec = next(s for s in snap["plan"]["steps"] if s["role"] == "security-analyst")
+    assert (dev["model"], dev["effort"], dev["profile"]) == ("haiku", "low", None)      # overridden, custom pair
+    assert (sec["model"], sec["effort"], sec["profile"]) == ("opus", "max", "max")       # the role's own: Max
+    assert snap["overrides"] == {"developer": {"model": "haiku", "effort": "low"}} and snap["planner"] == {"model": "sonnet", "effort": "medium"}
+    assert call(ui, "POST", "/api/pipeline/approve", {})[0] == 200
+    wait_state(ui, "review", "idle")
+    assert (repo / ".uno" / "roles" / "developer.json").read_text() == before              # the role file did not change
+    assert roles_mod.trusted(repo, ui.state_dir)
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    assert dev["usage"]["model"] == "haiku" and dev["usage"]["effort"] == "low"
+    assert dev["usage"]["model_used"] == "mock:haiku" and dev["usage"]["turns"] >= 1 and dev["usage"]["seconds"] >= 0
+    events = [json.loads(l) for l in ui.events_path.read_text().splitlines()]
+    start = next(e for e in events if e["kind"] == "start" and e["source"] == "developer")
+    assert (start["model"], start["effort"]) == ("haiku", "low")
+    start = next(e for e in events if e["kind"] == "start" and e["source"] == "security-analyst")
+    assert (start["model"], start["effort"]) == ("opus", "max") and start["override_only"] is False
+    done = next(e for e in events if e["kind"] == "done" and e["source"] == "developer")
+    assert done["model_used"] == "mock:haiku" and isinstance(done["turns"], int) and isinstance(done["seconds"], float)
+    # A later session without overrides uses the saved values again.
+    call(ui, "POST", "/api/pipeline/discard", {})
+    assert chat(ui, repo, "again")[0] == 200 and wait_state(ui, "proposed") == "proposed"
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    assert (dev["model"], dev["effort"], dev["profile"]) == ("sonnet", "high", "balanced") and snap["overrides"] == {}
+
+
+def test_parallel_run_results_record_model_effort_turns_and_seconds(ui, repo):
+    f = {"repo": str(repo), "backend": "mock", "parallel": 2,
+         "tasks": [{"name": "a", "prompt": "edit a.txt", "paths": ["a.txt"], "model": "opus", "effort": "xhigh"},
+                   {"name": "b", "prompt": "edit b.txt", "paths": ["b.txt"]}]}
+    assert call(ui, "POST", "/api/start", f)[0] == 200
+    for _ in range(300):
+        if ui.run and ui.run.get("finished"):
+            break
+        time.sleep(0.1)
+    by = {a["name"]: a["usage"] for a in ui.run["results"]["agents"]}
+    assert by["a"]["model"] == "opus" and by["a"]["effort"] == "xhigh" and by["a"]["model_used"] == "mock:opus"
+    assert by["b"]["model"] == "sonnet" and by["b"]["effort"] == "high"              # default profile for a non-role name
+    assert all(u["turns"] >= 1 and u["seconds"] is not None for u in by.values())
+
+
+def test_unavailable_model_is_a_clear_error(tmp_path):
+    """What the CLI does for a model this login cannot use (observed with 2.1.296): a result
+    message with is_error and "issue with the selected model", exit 1, and
+    "[claude-code:unrecognized_model]" on stderr. Both paths end in the same clear error."""
+    from uno_orchestra.worker import Task
+
+    class FakeStream:
+        def __init__(self, lines): self.lines = lines
+        def __aiter__(self): return self
+        async def __anext__(self):
+            if not self.lines: raise StopAsyncIteration
+            return self.lines.pop(0)
+        async def read(self): return b"[claude-code:unrecognized_model] {\"model\":\"opus\"}\n"
+
+    class FakeProc:
+        def __init__(self, lines, code): self.stdout, self.stderr, self.code = FakeStream(lines), FakeStream([]), code
+        async def wait(self): return self.code
+
+    w = Worker(Task("a", "p", ["**"], model="opus", effort="high"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), "claude", 10, tmp_path)
+    bad = (b'{"type":"system","subtype":"init","model":"claude-opus-5-5"}\n',
+           b'{"type":"result","is_error":true,"result":"There\'s an issue with the selected model (opus). It may not exist or you may not have access to it.","num_turns":1,"modelUsage":{}}\n')
+    with pytest.raises(RuntimeError, match=r"model 'opus' is not available with this login.*Choose one of \['opus', 'sonnet', 'haiku'\]"):
+        asyncio.run(w._read_stream(FakeProc(list(bad), 1)))
+    with pytest.raises(RuntimeError, match="not available with this login"):
+        asyncio.run(w._read_stream(FakeProc([], 1)))                                  # stderr path, no result message
+    assert w.output is None                                                           # never swapped to another model
+    good = [b'{"type":"system","subtype":"init","model":"claude-opus-5-5"}\n',
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+            b'{"type":"result","is_error":false,"result":"ok","num_turns":3,"modelUsage":{"claude-opus-5-5":{}}}\n']
+    asyncio.run(w._read_stream(FakeProc(good, 0)))
+    assert w.output == "ok" and w.model_used == "claude-opus-5-5" and w.turns == 3
+    assert w.usage() == {"model": "opus", "effort": "high", "model_used": "claude-opus-5-5", "turns": 3, "seconds": None, "override_only": False}
+
+
+# --- model policy: opus is the top; fable only as a confirmed per-run override ---------------
+
+def test_fable_cannot_be_saved_in_a_role_a_repo_file_or_a_template(ui, repo):
+    from uno_orchestra import config
+    r = {"name": "x", "description": "d", "instructions": "i", "preset": "edit", "paths": ["**"], "model": "fable", "effort": "max"}
+    status, body = call(ui, "POST", "/api/roles", {"repo": str(repo), "role": r})
+    assert status == 400 and "cannot be saved" in body["error"]                            # the UI editor
+    assert call(ui, "POST", "/api/role-templates", {"role": r})[0] == 400                 # the personal library
+    assert call(ui, "POST", "/api/templates", {"name": "t", "repo": str(repo), "backend": "mock", "parallel": 1,
+                                                "tasks": [{"name": "a", "prompt": "p", "paths": ["**"], "model": "fable"}]})[0] == 400  # run templates
+    with pytest.raises(ValueError, match="cannot be saved"):
+        roles_mod.save_template(ui.state_dir, roles_mod.Role("x", "d", "i", "edit", ["**"], model="fable"))
+    with pytest.raises(ValueError):
+        config.set_value(ui.state_dir, "planner_model", "fable")                           # the settings
+    # A role file in the repository that carries fable is invalid: reported, never loaded.
+    path = repo / ".uno" / "roles" / "developer.json"
+    data = json.loads(path.read_text()); data["model"] = "fable"
+    path.write_text(json.dumps(data))
+    _, view = call(ui, "GET", f"/api/roles?repo={repo}")
+    assert view["roles"] == [] and "developer.json" in view["error"] and "fable" in view["error"]
+    assert chat(ui, repo, "hi")[0] == 400
+    # A personal template file with fable is skipped, like any invalid one.
+    (ui.state_dir / "role-templates").mkdir(mode=0o700, exist_ok=True)
+    (ui.state_dir / "role-templates" / "turbo.json").write_text(json.dumps(dict(r, name="turbo")))
+    assert "turbo" not in [x["name"] for x in call(ui, "GET", "/api/role-templates")[1]["library"]]
+    # Defaults and built-ins never use it; uno init proposes nothing with it.
+    from uno_orchestra import init
+    assert all(t.model != "fable" for t, _ in roles_mod.library(ui.state_dir).values())
+    assert all(x.model != "fable" for x in init.propose_roles(init.analyze(repo)))
+
+
+def test_plan_without_override_never_uses_fable_and_fable_override_needs_confirmation(ui, repo):
+    assert chat(ui, repo, "do the thing")[0] == 200 and wait_state(ui, "proposed") == "proposed"
+    _, snap = call(ui, "GET", "/api/pipeline")
+    assert all(not s["override_only"] and s["model"] != "fable" for s in snap["plan"]["steps"])
+    assert snap["override_only_steps"] == [] and snap["planner_override_only"] is False
+    assert call(ui, "POST", "/api/pipeline/approve", {})[0] == 200                         # no confirmation needed
+    wait_state(ui, "review", "idle")
+    call(ui, "POST", "/api/pipeline/discard", {})
+    # With an override: the plan says so, approving needs the explicit flag, and events mark it.
+    assert chat(ui, repo, "again", overrides={"developer": {"model": "fable"}}, planner={"model": "fable", "effort": "max"})[0] == 200
+    wait_state(ui, "proposed")
+    _, snap = call(ui, "GET", "/api/pipeline")
+    assert snap["override_only_steps"] == ["developer"] and snap["planner_override_only"] is True
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    assert dev["model"] == "fable" and dev["override_only"] is True and dev["effort"] == "high"   # the role's effort is kept
+    status, body = call(ui, "POST", "/api/pipeline/approve", {})
+    assert status == 409 and body["code"] == "confirm_override_only" and body["steps"] == ["developer"] and "Fable" in body["error"]
+    assert call(ui, "POST", "/api/pipeline/approve", {"confirm_override_only": "yes"})[0] == 409   # a real boolean, not truthy text
+    assert ui.chat.state == "proposed"
+    assert call(ui, "POST", "/api/pipeline/approve", {"confirm_override_only": True})[0] == 200
+    wait_state(ui, "review", "idle")
+    events = [json.loads(l) for l in ui.events_path.read_text().splitlines()]
+    start = [e for e in events if e["kind"] == "start" and e["source"] == "developer"][-1]
+    done = [e for e in events if e["kind"] == "done" and e["source"] == "developer"][-1]
+    assert start["model"] == "fable" and start["override_only"] is True and done["override_only"] is True and done["model_used"] == "mock:fable"
+    sec = [e for e in events if e["kind"] == "start" and e["source"] == "security-analyst"][-1]
+    assert sec["override_only"] is False
+    assert (repo / ".uno" / "roles" / "developer.json").read_text().count("fable") == 0       # still not in the role
+
+
+def test_planner_output_never_chooses_a_model(ui, repo):
+    roles = roles_mod.load_roles(repo)
+    raw = {"summary": "s", "steps": [{"id": "impl", "role": "developer", "goal": "g", "paths": ["**"], "depends_on": [],
+                                       "model": "fable", "effort": "max"}]}
+    _, steps = pipeline.validate_plan(raw, roles)
+    assert steps[0].model is None and steps[0].effort is None                               # ignored, assigned later by code
+    assert chat(ui, repo, json.dumps(raw))[0] == 200 and wait_state(ui, "proposed") == "proposed"   # the mock planner returns the JSON verbatim
+    _, snap = call(ui, "GET", "/api/pipeline")
+    assert snap["plan"]["steps"][0]["model"] == "sonnet" and snap["override_only_steps"] == []
+    # No fallback or retry can reach fable: the command never carries --fallback-model and the
+    # retry after a rejected plan uses the same pair.
+    from uno_orchestra.worker import Task
+    cmd = Worker(Task("a", "p", ["**"]), repo, "b", EventBus(repo / "e"), "claude", 10, repo).command(env={})
+    assert "--fallback-model" not in cmd and "--fallback-model" not in pipeline.planner_command("r", "s")

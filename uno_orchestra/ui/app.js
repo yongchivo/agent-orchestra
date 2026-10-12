@@ -1,15 +1,17 @@
 // Uno control UI. No inline scripts (CSP) and no HTML string injection:
-// everything that comes from agents, diffs, files or the server is rendered with textContent.
+// everything that comes from agents, diffs, files, dictionaries or the server is rendered
+// with textContent. Preferences (language, mode, last project) live in localStorage; the
+// token never does: it is read once from the URL fragment and kept in memory.
 (() => {
   'use strict';
 
   // --- token: read once from the fragment, kept in memory only, URL cleaned ---------------
   let token = '';
-  const m = /(?:^|[#&])token=([A-Za-z0-9_-]+)/.exec(location.hash);
-  if (m) {
-    token = m[1];
-    history.replaceState(null, '', location.pathname);
-  }
+  const frag = location.hash;
+  const m = /(?:^|[#&])token=([A-Za-z0-9_-]+)/.exec(frag);
+  if (m) token = m[1];
+  const fragPref = key => { const r = new RegExp('(?:^|[#&])' + key + '=([a-z]+)').exec(frag); return r ? r[1] : null; };
+  if (frag) history.replaceState(null, '', location.pathname);
 
   const $ = id => document.getElementById(id);
   const el = (tag, cls, text) => {
@@ -21,30 +23,140 @@
   const clear = node => { while (node.firstChild) node.firstChild.remove(); };
   const setList = (ul, items) => { clear(ul); items.forEach(t => ul.appendChild(el('li', '', t))); };
 
+  // --- preferences: language, mode, last project. Never the token. -----------------------
+  const PREFS = { lang: 'uno.lang', mode: 'uno.mode', repo: 'uno.repo' };
+  function pref(key, value) {
+    try {
+      if (value === undefined) return localStorage.getItem(PREFS[key]);
+      localStorage.setItem(PREFS[key], value);
+    } catch { /* storage unavailable: the page still works */ }
+    return null;
+  }
+
+  // --- i18n: static dictionaries, interface only; agent text is shown as it comes ---------
+  let dict = {};
+  const t = (key, vars) => {
+    let s = Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key;
+    if (vars) for (const [k, v] of Object.entries(vars)) s = s.split('{' + k + '}').join(String(v));
+    return s;
+  };
+  function applyI18n(root) {
+    root.querySelectorAll('[data-i18n]').forEach(n => { n.textContent = t(n.dataset.i18n); });
+    root.querySelectorAll('[data-i18n-placeholder]').forEach(n => { n.placeholder = t(n.dataset.i18nPlaceholder); });
+  }
+  async function setLang(lang) {
+    if (!['es', 'en'].includes(lang)) lang = 'es';
+    try { const r = await fetch('/i18n/' + lang + '.json'); dict = r.ok ? await r.json() : {}; } catch { dict = {}; }
+    document.documentElement.lang = lang;
+    pref('lang', lang);
+    $('langSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === lang)));
+    applyI18n(document);
+    renderAll();
+  }
+  $('langSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLang(b.dataset.lang); });
+
+  // --- simple / advanced: a CSS class. Permissions and limits are the server's, not the mode's.
+  function setMode(mode) {
+    const simple = mode !== 'advanced';
+    document.body.classList.toggle('simple', simple);
+    pref('mode', simple ? 'simple' : 'advanced');
+    $('modeSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.mode === 'advanced') !== simple)));
+  }
+  $('modeSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.mode); });
+
+  // --- connection and notices ------------------------------------------------------------
+  const conn = $('conn');
+  function setConn(state) {
+    conn.className = 'conn ' + ({ live: 'live', refused: 'bad', offline: 'bad' }[state] || 'idle');
+    $('connText').textContent = t('conn.' + state);
+  }
+  let noticeKey = null;
+  function notice(key) { noticeKey = key; const n = $('notice'); n.hidden = !key; n.textContent = key ? t(key) : ''; }
+
   async function api(path, body) {
     const headers = { 'X-Orchestra-Token': token };
     const opts = { method: body ? 'POST' : 'GET', headers };
     if (body) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-    const r = await fetch(path, opts);
+    let r;
+    try { r = await fetch(path, opts); }
+    catch { setConn('offline'); notice('notice.offline'); throw new Error(t('notice.offline')); }
     const data = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (r.status === 401) setConn('● no token: restart uno ui', 'var(--red)');
+    if (r.status === 401) { setConn('offline'); notice('notice.token'); }
+    else if (r.ok) notice(null);
     if (!r.ok && !data.errors) throw new Error(data.error || `HTTP ${r.status}`);
     return data;
   }
 
-  const conn = $('conn'), statusText = $('statusText');
-  function setConn(text, color) { conn.textContent = text; conn.style.color = color; }
+  // --- status chips: colour independent of the gradient, always icon + text ---------------
+  const STATUS_CLASS = { merged: 'ok', done: 'ok', running: 'run', pending: 'dim', blocked: 'warn', failed: 'bad',
+                         conflict: 'bad', out_of_scope: 'warn', needs_review: 'warn' };
+  const STATUS_ICON = { ok: '✔', run: '●', dim: '○', warn: '▲', bad: '✖' };
+  function chip(status) {
+    const c = STATUS_CLASS[status] || 'dim';
+    return el('span', 'chip ' + c, STATUS_ICON[c] + ' ' + t('status.' + (STATUS_CLASS[status] ? status : 'unknown')));
+  }
 
-  // --- task editor -----------------------------------------------------------------------
+  // --- project selector: recent repositories, the free path only in advanced mode ----------
+  let statusData = {};
+  function fillProjects() {
+    const sel = $('project'), cur = $('repo').value.trim(); clear(sel);
+    sel.appendChild(el('option', '', t('project.none'))).value = '';
+    const configured = statusData.configured || [];
+    (statusData.recent_repos || []).forEach(r => {
+      const name = r.split('/').filter(Boolean).pop() || r;
+      const o = el('option', '', configured.includes(r) ? name : `${name} · ${t('project.unconfigured')}`);
+      o.value = r; o.title = r; sel.appendChild(o);
+    });
+    if (cur && ![...sel.options].some(o => o.value === cur)) { const o = el('option', '', cur.split('/').filter(Boolean).pop() || cur); o.value = cur; sel.appendChild(o); }
+    sel.value = cur;
+    const dl = $('recent'); clear(dl); (statusData.recent_repos || []).forEach(r => dl.appendChild(el('option', '', r)));
+  }
+  function selectRepo(path) {
+    $('repo').value = path;
+    pref('repo', path);
+    fillProjects(); loadRoles(); runCheck(); updateGithub();
+  }
+  $('project').addEventListener('change', () => selectRepo($('project').value));
+  $('repo').addEventListener('change', () => selectRepo($('repo').value.trim()));
+
+  // Plain-language state of the selected project, with the action to take.
+  function renderProjectState() {
+    const box = $('projectState'); clear(box); box.className = 'pstate';
+    const repo = $('repo').value.trim();
+    const say = (key, vars, action) => {
+      box.classList.add('err'); box.appendChild(el('span', '', t(key, vars)));
+      if (action) { const b = el('button', 'ghost small', t(action.label)); b.addEventListener('click', action.run); box.appendChild(b); }
+    };
+    if (!repo) return say('err.noproject');
+    const d = rolesData;
+    if (d.error) { box.classList.add('err'); return box.appendChild(el('span', '', d.error)); }
+    if (!(d.roles || []).length) return say('err.noroles');
+    if (d.on_main) return say('err.main', { branch: d.branch }, { label: 'err.main.action', run: createBranch });
+    if (d.preflight) { if (/uncommitted/.test(d.preflight)) return say('err.dirty'); box.classList.add('err'); return box.appendChild(el('span', '', d.preflight)); }
+    if (d.trusted === false) return say('err.untrusted', {}, { label: 'err.untrusted.action', run: () => { setMode('advanced'); $('rolesPanel').scrollIntoView({ behavior: 'smooth' }); } });
+    box.appendChild(el('span', 'hint', t('ok.project', { branch: d.branch || '?', n: d.roles.length })));
+  }
+
+  async function createBranch() {
+    const repo = $('repo').value.trim();
+    const name = 'uno-run-' + new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '').replace(/(\d{8})(\d{4})/, '$1-$2');
+    if (!confirm(t('branch.confirm', { name, repo }))) return;
+    try { const r = await api('/api/branch', { repo, name }); $('runState').textContent = t('branch.created', { branch: r.branch }); }
+    catch (e) { $('runState').textContent = e.message; }
+    loadRoles(); runCheck();
+  }
+
+  // --- task editor (advanced: parallel runs) ----------------------------------------------
   const tasksBox = $('tasks');
-  function addTask(t) {
+  function addTask(task) {
     const row = $('taskRow').content.firstElementChild.cloneNode(true);
-    if (t) {
-      row.querySelector('.t-name').value = t.name || '';
-      row.querySelector('.t-prompt').value = t.prompt || '';
-      row.querySelector('.t-paths').value = (t.paths || []).join(' ');
-      row.querySelector('.t-preset').value = t.preset || 'edit';
-      row.querySelector('.t-turns').value = t.max_turns || 10;
+    applyI18n(row);
+    if (task) {
+      row.querySelector('.t-name').value = task.name || '';
+      row.querySelector('.t-prompt').value = task.prompt || '';
+      row.querySelector('.t-paths').value = (task.paths || []).join(' ');
+      row.querySelector('.t-preset').value = task.preset || 'edit';
+      row.querySelector('.t-turns').value = task.max_turns || 10;
     }
     row.querySelector('.t-remove').addEventListener('click', () => { row.remove(); scheduleCheck(); });
     row.querySelectorAll('input, textarea, select').forEach(i => i.addEventListener('input', scheduleCheck));
@@ -76,22 +188,11 @@
     }
     setList($('errors'), lastCheck.errors || []);
     setList($('warnings'), lastCheck.warnings || []);
-    setList($('steering'), (lastCheck.steering || []).length
-      ? [`the repository contains agent instruction files that may reach the model: ${lastCheck.steering.join(', ')}`] : []);
+    setList($('steering'), (lastCheck.steering || []).length ? [t('adv.steering', { files: lastCheck.steering.join(', ') })] : []);
     $('start').disabled = !lastCheck.ok || running;
-    $('branch').hidden = !lastCheck.on_main;
-    updateGithub();
   }
   ['repo', 'backend', 'parallel'].forEach(id => $(id).addEventListener('input', scheduleCheck));
   $('addTask').addEventListener('click', () => addTask());
-
-  $('branch').addEventListener('click', async () => {
-    const name = 'uno-run-' + new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '').replace(/(\d{8})(\d{4})/, '$1-$2');
-    if (!confirm(`Create and check out branch ${name} in ${$('repo').value.trim()}?`)) return;
-    try { const r = await api('/api/branch', { repo: $('repo').value.trim(), name }); $('runState').textContent = `on branch ${r.branch}`; }
-    catch (e) { $('runState').textContent = e.message; }
-    runCheck();
-  });
 
   // --- GitHub helpers: a link and a command to copy; the UI never runs gh -----------------
   function updateGithub() {
@@ -110,39 +211,56 @@
   $('tplSave').addEventListener('click', async () => {
     try {
       const r = await api('/api/templates', { name: $('tplName').value.trim(), ...payload() });
-      fillTemplates(r.templates); $('runState').textContent = `saved template ${r.saved}`;
+      fillTemplates(r.templates); $('runState').textContent = t('run.saved', { name: r.saved });
     } catch (e) { $('runState').textContent = e.message; }
   });
   $('tplLoad').addEventListener('click', async () => {
     const name = $('tplList').value; if (!name) return;
     try {
-      const t = await api('/api/templates/' + encodeURIComponent(name));
-      $('repo').value = t.repo || ''; $('backend').value = t.backend || 'mock'; $('parallel').value = t.parallel || 2;
-      clear(tasksBox); t.tasks.forEach(addTask);
+      const tpl = await api('/api/templates/' + encodeURIComponent(name));
+      $('backend').value = tpl.backend || 'mock'; $('parallel').value = tpl.parallel || 2;
+      if (tpl.repo) selectRepo(tpl.repo);
+      clear(tasksBox); tpl.tasks.forEach(addTask);
     } catch (e) { $('runState').textContent = e.message; }
   });
 
-  // --- run: start, stream, stop ----------------------------------------------------------
+  // --- live agents: one node per agent plus the orchestrator, pulses for messages ---------
   let running = false;
   const agents = new Map(), roleOf = new Map();  // roleOf: step -> role, from a pipeline's run_start
-  function agentCard(name) {
+  let lastRun = null;
+  function nodeFor(name) {
     if (!agents.has(name)) {
-      const node = el('div', 'node');
-      node.appendChild(el('div', 'title', name));
-      const body = el('div', 'body'); body.appendChild(el('span', 'task', '—')); body.appendChild(el('span', 'pct', '0%'));
-      node.appendChild(body);
+      const orc = name === 'orchestrator';
+      const node = el('div', 'node' + (orc ? ' orc' : ''));
+      node.appendChild(el('div', 'title', orc ? t('agents.orchestrator') : name));
+      node.appendChild(el('div', 'role', roleOf.get(name) || ''));
+      node.appendChild(el('span', 'task', ''));
+      const foot = el('div', 'foot'); foot.appendChild(chip('pending')); foot.appendChild(el('span', 'pct', '')); node.appendChild(foot);
       const bar = el('div', 'bar'); bar.appendChild(el('i')); node.appendChild(bar);
-      $('agents').appendChild(node);
-      agents.set(name, { node, pct: 0 });
+      $('agents').appendChild(node); $('stage').classList.add('busy');
+      agents.set(name, { node, pct: 0, orc });
     }
     return agents.get(name);
   }
   function setAgent(name, status, pct, label) {
-    const a = agentCard(name);
-    a.node.className = 'node ' + status;
+    const a = nodeFor(name);
+    if (status) { a.status = status; a.node.className = 'node ' + status + (a.orc ? ' orc' : ''); a.node.querySelector('.chip').replaceWith(chip(status)); }
     if (pct !== undefined) { a.pct = Math.max(a.pct, pct); a.node.querySelector('.pct').textContent = a.pct + '%'; a.node.querySelector('.bar i').style.width = a.pct + '%'; }
     if (label) a.node.querySelector('.task').textContent = label;
+    const role = roleOf.get(name); if (role && !a.node.querySelector('.role').textContent) a.node.querySelector('.role').textContent = role;
   }
+  function pulse(from, to) {
+    const a = agents.get(from), b = agents.get(to);
+    if (!a || !b || a === b || typeof a.node.animate !== 'function') return;
+    const stage = $('stage'), sr = stage.getBoundingClientRect();
+    const centre = n => { const r = n.node.getBoundingClientRect(); return [r.left - sr.left + r.width / 2 + stage.scrollLeft, r.top - sr.top + r.height / 2 + stage.scrollTop]; };
+    const [x1, y1] = centre(a), [x2, y2] = centre(b);
+    const dot = el('i', 'pulse'); dot.style.left = (x1 - 5) + 'px'; dot.style.top = (y1 - 5) + 'px'; stage.appendChild(dot);
+    const anim = dot.animate([{ transform: 'translate(0,0)', opacity: 1 }, { transform: `translate(${x2 - x1}px,${y2 - y1}px)`, opacity: .3 }],
+                             { duration: 700, easing: 'ease-in-out' });
+    anim.onfinish = () => dot.remove();
+  }
+  function resetStage() { clear($('agents')); agents.clear(); roleOf.clear(); clear($('log')); lastRun = null; $('liveTitle').textContent = ''; }
   function fmtTs(ts) { const d = new Date(ts * 1000); return d.toTimeString().slice(3, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0'); }
   function addLog(e) {
     const row = el('div', 'msg kind-' + e.kind);
@@ -155,22 +273,30 @@
   }
   function handle(e) {
     switch (e.kind) {
-      case 'run_start': (e.workers || []).forEach(w => agentCard(w)); Object.entries(e.roles || {}).forEach(([w, r]) => roleOf.set(w, r)); $('liveTitle').textContent = `${e.run_id} · ${e.backend} · ${e.message}`; break;
-      case 'start': setAgent(e.source, 'running', 0, roleOf.get(e.source) || (e.message || '').split(/\s+/).slice(0, 3).join(' ')); break;
-      case 'progress': setAgent(e.source, 'running', e.progress); return;  // shown on the card only
-      case 'done': setAgent(e.source, 'done', 100); break;
-      case 'failed': if (e.source !== 'orchestrator') setAgent(e.source, 'failed'); break;
-      case 'conflict': case 'out_of_scope': case 'needs_review': setAgent(e.target, e.kind); break;
-      case 'merge': setAgent(e.target, 'merged', 100); break;
-      case 'handoff': case 'iteration': case 'question': break;  // logged below, shown as bus messages
+      case 'run_start':
+        Object.entries(e.roles || {}).forEach(([w, r]) => roleOf.set(w, r));
+        setAgent('orchestrator', 'running', undefined, e.message); (e.workers || []).forEach(w => nodeFor(w));
+        lastRun = { id: e.run_id, backend: e.backend }; $('liveTitle').textContent = t('agents.run', lastRun); break;
+      case 'start': setAgent(e.source, 'running', 0, e.message); if (e.model) { const rl = nodeFor(e.source).node.querySelector('.role'); rl.textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); rl.classList.toggle('fable', !!e.override_only); } pulse('orchestrator', e.source); break;
+      case 'progress': setAgent(e.source, 'running', e.progress); return;  // shown on the node only
+      case 'tool': case 'say': setAgent(e.source, undefined, undefined, e.message); break;
+      case 'done': setAgent(e.source, 'done', 100, e.message); if (e.model) { const rl = nodeFor(e.source).node.querySelector('.role'); rl.textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); rl.classList.toggle('fable', !!e.override_only); } pulse(e.source, 'orchestrator'); break;
+      case 'failed': setAgent(e.source, 'failed', undefined, e.message); break;
+      case 'conflict': case 'out_of_scope': case 'needs_review': setAgent(e.target, e.kind, undefined, e.message); pulse('orchestrator', e.target); break;
+      case 'merge': setAgent(e.target, 'merged', 100, e.message); pulse('orchestrator', e.target); break;
+      case 'handoff': setAgent(e.source, undefined, undefined, e.message); pulse(e.source, e.target); break;
+      case 'iteration': case 'question': case 'warning': setAgent('orchestrator', undefined, undefined, e.message); break;
+      case 'run_end': setAgent('orchestrator', 'done', undefined, e.message); break;
     }
     addLog(e);
   }
 
   async function stream(offset) {
-    const r = await fetch('/api/events?from=' + offset, { headers: { 'X-Orchestra-Token': token } });
-    if (!r.ok) { setConn('● stream refused', 'var(--red)'); return; }
-    setConn('● live', 'var(--green)');
+    let r;
+    try { r = await fetch('/api/events?from=' + offset, { headers: { 'X-Orchestra-Token': token } }); }
+    catch { setConn('offline'); notice('notice.offline'); return; }
+    if (!r.ok) { setConn('refused'); if (r.status === 401) notice('notice.token'); return; }
+    setConn('live');
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = '';
     for (;;) {
@@ -190,8 +316,8 @@
 
   let pipelineLive = false;
   async function finish() {
-    running = false; $('stop').disabled = true; $('runState').textContent = 'finished';
-    setConn('● idle', 'var(--dim)');
+    running = false; $('stop').disabled = true; $('runState').textContent = t('run.finished');
+    setConn('idle');
     if (pipelineLive) { pipelineLive = false; await refreshPipeline(); }
     else { try { renderResults(await api('/api/results'), true); } catch (e) { $('runState').textContent = e.message; } }
     runCheck();
@@ -202,22 +328,21 @@
     try {
       const r = await api('/api/start', payload());
       if (r.errors) { setList($('errors'), r.errors); $('start').disabled = false; return; }
-      running = true; $('stop').disabled = false; $('runState').textContent = 'running…';
-      $('live').hidden = false; $('results').hidden = true; clear($('agents')); clear($('log')); agents.clear();
-      statusText.textContent = `running in ${$('repo').value.trim()}`;
+      running = true; $('stop').disabled = false; $('runState').textContent = t('run.running');
+      $('results').hidden = true; resetStage();
       stream(r.offset);
     } catch (e) { $('runState').textContent = e.message; $('start').disabled = false; }
   });
   $('stop').addEventListener('click', async () => {
     $('stop').disabled = true;
-    try { await api('/api/stop', {}); $('runState').textContent = 'stopping: killing agent process groups…'; }
+    try { await api('/api/stop', {}); $('runState').textContent = t('run.stopping'); }
     catch (e) { $('runState').textContent = e.message; }
   });
 
   // --- results: fail closed, no merge button for anything the gate rejected ---------------
   function diffPre(text) {
     const pre = el('pre', 'diff');
-    (text || '(no diff)').split('\n').forEach(line => {
+    (text || t('review.nodiff')).split('\n').forEach(line => {
       const cls = line.startsWith('+') && !line.startsWith('+++') ? 'add'
                 : line.startsWith('-') && !line.startsWith('---') ? 'del'
                 : /^(diff|index|@@|\+\+\+|---)/.test(line) ? 'meta' : '';
@@ -225,53 +350,132 @@
     });
     return pre;
   }
+  let lastResults = null;
   function renderResults(res, scroll) {
+    lastResults = res;
     const box = $('resultList'); clear(box);
     $('results').hidden = false;
-    $('resultsTitle').textContent = `${res.run_id || '—'} · ${res.repo} on ${res.branch || '?'} · ${res.seconds}s`;
     const v = Object.values(res.summary || {});
-    statusText.textContent = `run finished · ${v.filter(x => x === 'merged').length}/${v.length} merged` + (res.error ? ` · ${res.error}` : '');
-    if (res.error) box.appendChild(el('p', 'reminder', `run error: ${res.error}`));
-    if ((res.steering || []).length) box.appendChild(el('p', 'reminder', `agent instruction files in the repository: ${res.steering.join(', ')}`));
+    $('resultsTitle').textContent = `${res.run_id || '—'} · ${res.repo} · ${res.branch || '?'} · ${res.seconds}s · `
+      + t('run.summary', { merged: v.filter(x => x === 'merged').length, total: v.length }) + (res.error ? ` · ${res.error}` : '');
+    if (res.error) box.appendChild(el('p', 'reminder', res.error));
+    if ((res.steering || []).length) box.appendChild(el('p', 'reminder', t('adv.steering', { files: res.steering.join(', ') })));
     for (const a of res.agents) {
       const card = el('div', 'result ' + a.verdict);
       const head = el('div', 'head');
-      head.appendChild(el('span', 'verdict', a.verdict)); head.appendChild(el('b', '', a.name));
-      head.appendChild(el('span', 'hint', `preset ${a.preset} · paths ${a.paths.join(' ')} · ${a.branch || 'no branch'}`));
+      head.appendChild(chip(a.verdict)); head.appendChild(el('b', '', a.name));
+      head.appendChild(el('span', 'hint', `preset ${a.preset} · paths ${a.paths.join(' ')} · ${a.branch || '—'}`));
+      if (a.usage) head.appendChild(el('span', 'usage' + (a.usage.override_only ? ' fable' : ''), usageText(a.usage)));
       card.appendChild(head);
       if (a.detail) card.appendChild(el('div', 'detail', a.detail));
       if (a.commands.length) {
-        card.appendChild(el('div', 'detail', 'Not merged. There is no merge button for this by design: review the diff, then merge by hand if it is right.'));
+        card.appendChild(el('div', 'detail', t('adv.results.manual')));
         card.appendChild(el('pre', '', a.commands.join('\n')));
       }
       card.appendChild(diffPre(a.diff));
       box.appendChild(card);
     }
-    if (scroll) $('results').scrollIntoView({ behavior: 'smooth' });
+    if (scroll) { setMode('advanced'); $('results').scrollIntoView({ behavior: 'smooth' }); }
   }
 
-  // --- roles & project context (.uno/ in the repository) ----------------------------
+  // --- models, efforts and profiles: the catalog comes from the server (models.json) --------
+  let catalog = { models: [], efforts: [], profiles: {}, role_defaults: {} };
+  const profileOf = (model, effort) => Object.keys(catalog.profiles).find(n => catalog.profiles[n].model === model && catalog.profiles[n].effort === effort) || '';
+  const defaultPair = name => catalog.profiles[catalog.role_defaults[name] || catalog.role_defaults['*']] || { model: '', effort: '' };
+  const overrideOnly = id => (catalog.override_only || []).includes(id);
+  function modelSelect(sel, value, perRun) {
+    // Saved things (roles, templates) never list an override-only model; a per-run override does.
+    clear(sel); catalog.models.forEach(m => { if (perRun || !overrideOnly(m.id)) { const o = el('option', '', m.label || m.id); o.value = m.id; sel.appendChild(o); } });
+    sel.value = value;
+  }
+  function effortSelect(sel, value) {
+    clear(sel); catalog.efforts.forEach(e => sel.appendChild(el('option', '', e)).value = e);
+    sel.value = value;
+  }
+  function profileSelect(sel, value) {
+    clear(sel); Object.keys(catalog.profiles).forEach(n => { const o = el('option', '', t('profile.' + n)); o.value = n; sel.appendChild(o); });
+    const custom = el('option', '', t('profile.custom')); custom.value = ''; custom.disabled = true; sel.appendChild(custom);
+    sel.value = value;
+  }
+  const usageText = u => u && u.model ? (u.override_only || overrideOnly(u.model) ? t('usage.fable') + ' · ' : '') + `${u.model_used || u.model} · ${u.effort}` + (u.turns ? ` · ${u.turns} ${t('usage.turns')}` : '') + (u.seconds != null ? ` · ${u.seconds}s` : '') : '';
+
+  // --- roles (dialog, both modes) & project context (.uno/ in the repository) --------------
   let rolesData = { roles: [] };
   const R = { name: 'r-name', preset: 'r-preset', output: 'r-output', max_turns: 'r-turns',
               description: 'r-desc', instructions: 'r-instr', output_format: 'r-format', paths: 'r-paths' };
   function fillRole(role) {
-    const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [] };
+    const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [], ...defaultPair('*') };
     for (const [k, id] of Object.entries(R)) $(id).value = k === 'paths' ? (r.paths || []).join(' ') : (r[k] ?? '');
+    modelSelect($('r-model'), r.model); effortSelect($('r-effort'), r.effort); profileSelect($('r-profile'), profileOf(r.model, r.effort));
+    $('r-newname').value = '';
   }
   function readRole() {
     const r = {};
     for (const [k, id] of Object.entries(R)) r[k] = $(id).value;
     r.name = r.name.trim(); r.max_turns = parseInt(r.max_turns, 10) || 0;
     r.paths = r.paths.split(/[\s,]+/).filter(Boolean);
+    // Simple mode: the profile decides; advanced: the exact pair. Both are catalog values only.
+    const simple = document.body.classList.contains('simple'), prof = catalog.profiles[$('r-profile').value];
+    r.model = simple && prof ? prof.model : $('r-model').value;
+    r.effort = simple && prof ? prof.effort : $('r-effort').value;
     return r;
+  }
+  $('r-profile').addEventListener('change', () => { const p = catalog.profiles[$('r-profile').value]; if (p) { $('r-model').value = p.model; $('r-effort').value = p.effort; } });
+  ['r-model', 'r-effort'].forEach(id => $(id).addEventListener('change', () => { $('r-profile').value = profileOf($('r-model').value, $('r-effort').value); }));
+
+  // Per-run overrides (advanced): the planner row plus one row per role, prefilled from the saved values.
+  function renderOverrides() {
+    const tb = $('overrides').querySelector('tbody'); const prev = readOverrides(); clear(tb);
+    const row = (key, label, model, effort) => {
+      const tr = el('tr'); tr.dataset.key = key; tr.appendChild(el('td', '', label));
+      const ms = el('select', 'ov-model'); modelSelect(ms, (prev[key] || {}).model || model, true); tr.appendChild(el('td')).appendChild(ms);
+      const es = el('select', 'ov-effort'); effortSelect(es, (prev[key] || {}).effort || effort); tr.appendChild(el('td')).appendChild(es);
+      tb.appendChild(tr);
+    };
+    const planner = (statusData.planner || defaultPair('planner'));
+    row('*planner', t('chat.planner'), planner.model, planner.effort);
+    (rolesData.roles || []).forEach(r => row(r.name, r.name, r.model, r.effort));
+  }
+  function readOverrides() {
+    const out = {};
+    $('overrides').querySelectorAll('tr').forEach(tr => { out[tr.dataset.key] = { model: tr.querySelector('.ov-model').value, effort: tr.querySelector('.ov-effort').value }; });
+    return out;
+  }
+  // Simple mode: one chip per role (and the orchestrator) switches that step to the
+  // override-only model for the next run only; the saved role never changes.
+  const special = new Set();
+  function renderSpecialChips() {
+    const box = $('specialChips'); clear(box);
+    const first = (catalog.override_only || [])[0]; if (!first) return;
+    [['*planner', t('chat.special.planner')], ...(rolesData.roles || []).map(r => [r.name, r.name])].forEach(([key, label]) => {
+      const b = el('button', 'ghost', label); b.type = 'button'; b.setAttribute('aria-pressed', String(special.has(key)));
+      b.addEventListener('click', () => { special.has(key) ? special.delete(key) : special.add(key); renderSpecialChips(); });
+      box.appendChild(b);
+    });
+  }
+  function runSettings() {
+    const simple = document.body.classList.contains('simple'), first = (catalog.override_only || [])[0];
+    const overrides = {};
+    let planner;
+    if (simple) {
+      (rolesData.roles || []).forEach(r => { if (special.has(r.name) && first) overrides[r.name] = { model: first, effort: r.effort }; });
+      if (special.has('*planner') && first) planner = { model: first, effort: (statusData.planner || {}).effort };
+    } else {
+      const all = readOverrides(); planner = all['*planner']; delete all['*planner'];
+      (rolesData.roles || []).forEach(r => { const o = all[r.name]; if (o && (o.model !== r.model || o.effort !== r.effort)) overrides[r.name] = o; });
+    }
+    return { overrides, planner: planner || undefined };
   }
   function renderRoles() {
     const sel = $('roleList'); const current = sel.value; clear(sel);
     sel.appendChild(el('option', '', '(new)')).value = '';
-    (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset} · ${r.output}`); o.value = r.name; sel.appendChild(o); });
+    (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset}`); o.value = r.name; sel.appendChild(o); });
     if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    const lib = $('libList'); const curLib = lib.value; clear(lib);
+    (rolesData.library || []).forEach(x => { const o = el('option', '', `${x.name} · ${t(x.builtin ? 'roles.builtin' : 'roles.mine')}`); o.value = x.name; lib.appendChild(o); });
+    if ([...lib.options].some(o => o.value === curLib)) lib.value = curLib;
+    $('rolesCount').textContent = t('roles.count', { n: (rolesData.roles || []).length, max: rolesData.max_roles || 12 });
     $('projectCtx').value = rolesData.project_context || '';
-    $('roleTemplates').disabled = !(rolesData.templates || []).length;
     $('orchestraCommit').hidden = !(rolesData.uncommitted || []).length;
     setList($('rolesErrors'), rolesData.error ? [rolesData.error] : []);
     const untrusted = rolesData.trusted === false && !rolesData.error;
@@ -283,67 +487,121 @@
     $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
       ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
       Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
+    $('rolesOpen').disabled = !$('repo').value.trim();
+    renderOverrides(); renderSpecialChips();
+    renderProjectState();
   }
   async function loadRoles() {
-    const repo = $('repo').value.trim(); if (!repo) return;
+    const repo = $('repo').value.trim();
+    if (!repo) { rolesData = { roles: [] }; renderRoles(); renderPipeline(); return; }
     try { rolesData = await api('/api/roles?repo=' + encodeURIComponent(repo)); }
     catch (e) { rolesData = { roles: [], error: e.message }; }
-    renderRoles();
+    renderRoles(); renderPipeline();
   }
   async function rolesPost(path, body) {
-    try { rolesData = await api(path, { repo: $('repo').value.trim(), ...body }); renderRoles(); }
-    catch (e) { setList($('rolesErrors'), [e.message]); }
+    try { rolesData = await api(path, { repo: $('repo').value.trim(), ...body }); renderRoles(); return true; }
+    catch (e) { setList($('rolesErrors'), [e.message]); return false; }
   }
-  $('roleList').addEventListener('change', () => fillRole((rolesData.roles || []).find(r => r.name === $('roleList').value)));
-  $('roleNew').addEventListener('click', () => { $('roleList').value = ''; fillRole(null); });
-  $('roleSave').addEventListener('click', () => rolesPost('/api/roles', { role: readRole() }).then(() => { $('roleList').value = readRole().name; }));
-  $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(`Delete role ${n}?`)) rolesPost('/api/roles/delete', { name: n }).then(() => fillRole(null)); });
-  $('roleTemplates').addEventListener('click', () => rolesPost('/api/roles/templates', {}));
+  const currentRole = () => (rolesData.roles || []).find(r => r.name === $('roleList').value);
+  function openRoles() {
+    if (!$('repo').value.trim()) { setList($('rolesErrors'), [t('roles.noproject')]); return; }
+    loadRoles().then(() => { fillRole(currentRole()); $('rolesDialog').showModal(); });
+  }
+  $('rolesOpen').addEventListener('click', openRoles);
+  $('rolesOpen2').addEventListener('click', openRoles);
+  $('roleList').addEventListener('change', () => fillRole(currentRole()));
+  $('roleNew').addEventListener('click', () => { $('roleList').value = ''; fillRole(null); $('r-name').focus(); });
+  $('roleDup').addEventListener('click', () => { const r = currentRole(); if (!r) return; $('roleList').value = ''; fillRole({ ...r, name: '' }); $('r-name').focus(); });
+  $('roleSave').addEventListener('click', () => { const r = readRole(); rolesPost('/api/roles', { role: r }).then(ok => { if (ok) { $('roleList').value = r.name; fillRole(currentRole()); } }); });
+  $('roleDelete').addEventListener('click', () => { const n = $('roleList').value; if (n && confirm(t('adv.roleDelete.confirm', { name: n }))) rolesPost('/api/roles/delete', { name: n }).then(ok => { if (ok) fillRole(null); }); });
+  $('roleRename').addEventListener('click', () => {
+    const name = $('roleList').value, next = $('r-newname').value.trim(); if (!name || !next) return;
+    rolesPost('/api/roles/rename', { name, new_name: next }).then(ok => { if (ok) { $('roleList').value = next; fillRole(currentRole()); } });
+  });
+  $('roleFromTpl').addEventListener('click', () => {
+    const template = $('libList').value; if (!template) return;
+    let name = template;
+    if ((rolesData.roles || []).some(r => r.name === template)) { name = prompt(t('roles.copyName'), template + '-2'); if (!name) return; }
+    rolesPost('/api/roles/from-template', { template, name }).then(ok => { if (ok) { $('roleList').value = name; fillRole(currentRole()); } });
+  });
+  $('roleTplSave').addEventListener('click', async () => {
+    try { const r = await api('/api/role-templates', { role: readRole() }); rolesData.library = r.library; renderRoles(); setList($('rolesErrors'), []); }
+    catch (e) { setList($('rolesErrors'), [e.message]); }
+  });
+  $('tplDelete').addEventListener('click', async () => {
+    const name = $('libList').value; if (!name || !confirm(t('roles.confirmDeleteTpl', { name }))) return;
+    try { const r = await api('/api/role-templates/delete', { name }); rolesData.library = r.library; renderRoles(); }
+    catch (e) { setList($('rolesErrors'), [e.message]); }
+  });
+  $('rolesDialog').addEventListener('close', () => { runCheck(); refreshPipeline(); });
   $('projectSave').addEventListener('click', () => rolesPost('/api/project', { context: $('projectCtx').value }));
   $('roleTrust').addEventListener('click', () => rolesPost('/api/roles/trust', {}).then(runCheck));
-  $('orchestraCommit').addEventListener('click', () => { if (confirm('Commit .uno/ (roles and project context) on the current branch?')) rolesPost('/api/roles/commit', {}); });
-  $('repo').addEventListener('change', loadRoles);
+  $('orchestraCommit').addEventListener('click', () => { if (confirm(t('adv.commit.confirm'))) rolesPost('/api/roles/commit', {}); });
 
   // --- pipeline: chat with the orchestrator, approve, watch, merge ------------------------
-  let pipe = { state: 'idle', transcript: [] }, pipeTimer = null;
+  let pipe = { state: 'idle', transcript: [] }, pipeTimer = null, lastState = 'idle';
+  const ACTIVE = ['planning', 'running', 'paused', 'question'];
+  function pendingCount() { return (pipe.state === 'proposed' ? 1 : 0) + (pipe.state === 'review' ? 1 : 0); }
   function renderPipeline() {
-    const st = pipe.state;
-    $('pipeState').textContent = st + (pipe.iterations ? ` · round ${pipe.iterations}/${pipe.max_iterations}` : '');
+    const st = pipe.state || 'idle';
+    $('pipeState').textContent = t('state.' + st) + (pipe.iterations ? ' · ' + t('chat.round', { n: pipe.iterations, max: pipe.max_iterations }) : '');
+    $('pipeInfo').textContent = pipe.branch ? t('review.branch', { branch: pipe.branch }) : '';
     const box = $('chat'); clear(box);
-    (pipe.transcript || []).forEach(m => {
-      const row = el('div', 'chat-msg ' + m.who); row.appendChild(el('span', 'who', m.who === 'you' ? 'you' : 'orchestrator'));
-      row.appendChild(el('span', 'text', m.text)); box.appendChild(row);
+    const transcript = pipe.transcript || [];
+    if (!transcript.length) box.appendChild(el('div', 'empty', t($('repo').value.trim() ? 'chat.empty.ready' : 'chat.empty.project')));
+    transcript.forEach(msg => {
+      const row = el('div', 'chat-msg ' + (msg.who === 'you' ? 'you' : 'orchestrator'));
+      row.appendChild(el('span', 'who', t(msg.who === 'you' ? 'chat.you' : 'chat.orchestrator')));
+      row.appendChild(el('span', 'text', msg.text)); box.appendChild(row);
     });
     box.scrollTop = box.scrollHeight;
-    $('pApprove').disabled = st !== 'proposed';
     $('pPause').disabled = st !== 'running';
     $('pResume').disabled = !(st === 'paused' || st === 'question');
-    $('pCancel').disabled = !['proposed', 'running', 'paused', 'question'].includes(st);
+    $('pCancel').disabled = !['running', 'paused', 'question'].includes(st);
     $('chatSend').disabled = st === 'planning';
-    $('pipeInfo').textContent = pipe.branch ? `integration branch ${pipe.branch}` : '';
-    const table = $('planTable'); table.hidden = !pipe.plan;
-    if (pipe.plan) {
-      const tb = table.querySelector('tbody'); clear(tb);
-      pipe.plan.steps.forEach((s, i) => {
+
+    const plan = pipe.plan;
+    $('planCard').hidden = !plan;
+    if (plan) {
+      $('planSummary').textContent = plan.summary;
+      const tb = $('planTable').querySelector('tbody'); clear(tb);
+      plan.steps.forEach((s, i) => {
         const tr = el('tr');
-        [String(i + 1), s.id, s.role, s.goal, s.paths.join(' '), s.depends_on.join(', ') || '—'].forEach(t => tr.appendChild(el('td', '', t)));
-        tr.appendChild(el('td', 'st-' + s.status, s.status + (s.detail ? `: ${s.detail}` : '') +
-          (s.findings && s.findings.length ? ` · ${s.findings.length} findings` : '')));
+        tr.appendChild(el('td', '', String(i + 1)));
+        tr.appendChild(el('td', 'mono', s.id));
+        const roleTd = el('td', '', s.role); if (s.model) roleTd.appendChild(el('div', 'usage' + (s.override_only ? ' fable' : ''), usageText(s.usage && s.usage.model_used ? s.usage : { model: s.model, effort: s.effort, override_only: s.override_only }))); tr.appendChild(roleTd);
+        tr.appendChild(el('td', 'goal', s.goal));
+        tr.appendChild(el('td', 'mono', s.paths.join(' '))); tr.appendChild(el('td', 'mono', s.depends_on.join(', ') || '—'));
+        const td = el('td'); td.appendChild(chip(s.status));
+        if (s.detail) td.appendChild(el('div', 'hint', s.detail));
+        if (s.findings && s.findings.length) td.appendChild(el('div', 'hint', `${s.findings.length} findings`));
+        tr.appendChild(td);
         tr.appendChild(el('td', '', s.iteration ? String(s.iteration) : '—'));
         tb.appendChild(tr);
       });
+      $('planActions').hidden = st !== 'proposed';
+      const fable = (pipe.override_only_steps || []).length > 0 || pipe.planner_override_only;
+      $('maxNote').hidden = !fable && !plan.steps.some(s => s.profile === 'max');
+      $('maxNote').textContent = t(fable ? 'review.fableNote' : 'review.maxNote');
     }
     const review = st === 'review' || st === 'merged';
     $('pipeReview').hidden = !review;
     if (review) {
-      setList($('pendingFindings'), (pipe.pending_findings || []).map(f =>
-        `[${f.severity}] ${f.step} (${f.role}): ${f.file}${f.line ? ':' + f.line : ''} — ${f.description} → ${f.recommendation}`));
+      const ul = $('pendingFindings'); clear(ul);
+      const findings = pipe.pending_findings || [];
+      if (!findings.length) ul.appendChild(el('li', 'none', t('review.findings.none')));
+      findings.forEach(f => ul.appendChild(el('li', 'sev-' + String(f.severity || '').toLowerCase(),
+        `[${f.severity}] ${f.step} (${f.role}): ${f.file}${f.line ? ':' + f.line : ''} — ${f.description} → ${f.recommendation}`)));
       const d = $('pipeDiff'); clear(d); d.appendChild(diffPre(pipe.diff));
       $('pipeCmds').textContent = (pipe.commands || []).join('\n');
       $('pMerge').disabled = st !== 'review';
     }
+    const n = pendingCount();
+    $('pendingCount').textContent = String(n); $('pendingCount').classList.toggle('zero', !n);
+    if (st !== lastState) { lastState = st; $('reviewPanel').scrollTop = 0; }
+    $('reviewEmpty').hidden = !!(plan || review);
     clearTimeout(pipeTimer);
-    if (['planning', 'running', 'paused', 'question'].includes(st)) pipeTimer = setTimeout(refreshPipeline, 1500);
+    if (ACTIVE.includes(st)) pipeTimer = setTimeout(refreshPipeline, 1500);
   }
   async function refreshPipeline() {
     try { pipe = await api('/api/pipeline'); } catch (e) { $('pipeState').textContent = e.message; return; }
@@ -353,41 +611,76 @@
     try { const r = await api(path, body || {}); await refreshPipeline(); return r; }
     catch (e) { $('pipeState').textContent = e.message; }
   }
-  $('chatSend').addEventListener('click', async () => {
+  async function send() {
     const message = $('chatInput').value.trim(); if (!message) return;
     const r = await pipePost('/api/chat', { message, repo: $('repo').value.trim(), backend: $('backend').value,
-      parallel: parseInt($('parallel').value, 10) || 0, max_iterations: parseInt($('iters').value, 10) || 0 });
+      parallel: parseInt($('parallel').value, 10) || 0, max_iterations: parseInt($('iters').value, 10) || 0, ...runSettings() });
     if (r) $('chatInput').value = '';
-  });
-  $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('chatSend').click(); });
-  $('pApprove').addEventListener('click', async () => {
-    const r = await pipePost('/api/pipeline/approve');
+  }
+  $('chatSend').addEventListener('click', send);
+  $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); } });
+  async function approvePlan() {
+    const body = {};
+    if ((pipe.override_only_steps || []).length) {
+      if (!confirm(t('review.confirmFable'))) return;   // explicit, separate from the plan approval
+      body.confirm_override_only = true;
+    }
+    const r = await pipePost('/api/pipeline/approve', body);
     if (!r) return;
-    running = true; pipelineLive = true; $('live').hidden = false; $('results').hidden = true;
-    clear($('agents')); clear($('log')); agents.clear(); roleOf.clear();
-    statusText.textContent = `pipeline running in ${$('repo').value.trim()}`;
+    running = true; pipelineLive = true; $('results').hidden = true; resetStage();
     stream(r.offset);
-  });
+  }
+  function merge() { if (confirm(t('review.confirm.merge', { branch: pipe.branch }))) pipePost('/api/pipeline/merge'); }
+  // Cmd/Ctrl+Enter approves whatever is pending, always after a confirmation.
+  function approvePending() {
+    if (pipe.state === 'proposed') { if (confirm(t('review.confirm.approve', { n: pipe.plan ? pipe.plan.steps.length : 0 }))) approvePlan(); }
+    else if (pipe.state === 'review') merge();
+  }
+  document.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); approvePending(); } });
+  $('pApprove').addEventListener('click', approvePlan);
+  $('pReject').addEventListener('click', () => pipePost('/api/pipeline/cancel'));
   $('pPause').addEventListener('click', () => pipePost('/api/pipeline/pause'));
   $('pResume').addEventListener('click', () => pipePost('/api/pipeline/resume'));
   $('pCancel').addEventListener('click', () => pipePost('/api/pipeline/cancel'));
-  $('pMerge').addEventListener('click', () => {
-    if (confirm(`Merge ${pipe.branch} into your branch? Review the diff and the pending findings first.`)) pipePost('/api/pipeline/merge');
-  });
+  $('pMerge').addEventListener('click', merge);
   $('pDiscard').addEventListener('click', () => pipePost('/api/pipeline/discard'));
+
+  // --- brand: PNGs served from outside the repository, or the neutral mark -----------------
+  function brand(on) {
+    document.body.classList.toggle('branded', !!on);
+    if (!on) return;
+    $('brandImg').src = '/brand/lockup.png'; $('heroImg').src = '/brand/mark.png';
+    $('favicon').href = '/brand/favicon.png';
+    const touch = document.createElement('link'); touch.rel = 'apple-touch-icon'; touch.href = '/brand/apple-touch.png';
+    document.head.appendChild(touch);
+  }
+
+  function renderAll() {
+    fillProjects(); renderProjectState(); renderPipeline();
+    agents.forEach(a => {
+      if (a.orc) a.node.querySelector('.title').textContent = t('agents.orchestrator');
+      a.node.querySelector('.chip').replaceWith(chip(a.status || 'pending'));
+    });
+    if (lastRun) $('liveTitle').textContent = t('agents.run', lastRun);
+    setConn(conn.className.includes('live') ? 'live' : conn.className.includes('bad') ? 'offline' : 'idle');
+    if (lastResults) renderResults(lastResults);
+    if (noticeKey) notice(noticeKey);
+  }
 
   // --- boot --------------------------------------------------------------------------------
   async function boot() {
+    setMode(fragPref('mode') || pref('mode') || 'simple');
+    await setLang(fragPref('lang') || pref('lang') || 'es');
     try {
-      const s = await api('/api/status');
-      const dl = $('recent'); clear(dl); (s.recent_repos || []).forEach(r => dl.appendChild(el('option', '', r)));
-      if (!$('repo').value && s.recent_repos && s.recent_repos[0]) $('repo').value = s.recent_repos[0];
-      fillTemplates(s.templates || []);
-      setConn('● idle', 'var(--dim)');
-      statusText.textContent = `local control · loopback only · auto-shutdown after ${Math.round(s.idle_timeout / 60)} min idle`;
-      if (s.running) { running = true; $('stop').disabled = false; $('live').hidden = false; stream(s.offset); }
-      else if (s.has_results) { try { renderResults(await api('/api/results')); } catch { /* none */ } }
-    } catch (e) { statusText.textContent = e.message; }
+      statusData = await api('/api/status');
+      catalog = statusData.models || catalog;
+      brand(statusData.brand);
+      const saved = pref('repo'), recent = statusData.recent_repos || [];
+      $('repo').value = saved && recent.includes(saved) ? saved : (recent[0] || '');
+      fillProjects(); fillTemplates(statusData.templates || []); setConn('idle');
+      if (statusData.running) { running = true; $('stop').disabled = false; stream(statusData.offset); }
+      else if (statusData.has_results) { try { renderResults(await api('/api/results')); } catch { /* none */ } }
+    } catch { setConn('offline'); }
     if (!tasksBox.children.length) addTask();
     updateGithub();
     runCheck();
