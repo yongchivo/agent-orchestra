@@ -12,87 +12,84 @@ page shows. The input in each case was one sentence plus the stack.
 **Idea:** La búsqueda de notas (/notes?q=) devuelve resultados raros con comillas en el texto y a veces rompe la app.  
 **Stack:** Python + Flask + SQLite  
 **Clarification questions:** 4, all skipped  
-**Linter:** 100/100, 0 warnings, 7127 characters  
+**Linter:** 100/100, 0 warnings, 7289 characters  
 **Suggested roles:** developer, tester, security-analyst (all present in the demo project)
 
 ```text
-Corregir la búsqueda /notes?q= con comillas en el texto (resultados incorrectos y caídas de la app)
+Corregir la búsqueda /notes?q= que devuelve resultados raros o rompe la app con comillas en el texto
 
 OBJETIVO
-Hacer que la búsqueda de notas en `/notes?q=` funcione de forma correcta y estable cuando el texto contiene comillas simples o dobles (y otros caracteres especiales), sin resultados raros ni caídas. La causa raíz probable es que la consulta SQLite se construye interpolando el texto del usuario; hay que confirmarlo leyendo el código y corregirlo en la ruta de código compartida, usando consultas parametrizadas.
+Corregir el endpoint de búsqueda `/notes?q=` para que un texto con comillas (simples o dobles) no produzca resultados incorrectos ni errores 500. La causa probable es que la consulta SQLite se construye concatenando o formateando el texto del usuario en lugar de usar parámetros enlazados; debe confirmarse leyendo el código antes de cambiarlo. Tras el arreglo, la búsqueda devuelve las notas que contienen el texto buscado, sea cual sea su contenido, sin romper la aplicación.
 
 CONTEXTO
-Proyecto demo-notes (Python + Flask + SQLite; código en `src/`, tests en `tests/`, dependencias con pip). Síntoma reportado: "La búsqueda de notas (/notes?q=) devuelve resultados raros con comillas en el texto y a veces rompe la app". No se concretó qué consulta exacta falla ni qué error aparece (pregunta sin responder), así que el primer paso es reproducirlo. Comportamiento esperado (a confirmar, ver supuestos): coincidencia literal de subcadena; las comillas se tratan como texto normal y nunca producen un error 500 ni alteran la estructura de la consulta SQL. Hipótesis a verificar, no darla por hecha: el filtro se arma con f-string, `%` o `.format` en lugar de parámetros `?`. Antes de empezar, actualiza la rama y lee el código actual de la ruta `/notes` y de la función que consulta la base de datos. El directorio de trabajo no es un repositorio git: comprueba el estado real antes de cualquier operación de git.
+Proyecto demo-notes: Python + Flask + SQLite, con código en `src/` y tests en `tests/` (pytest; hay un único archivo de tests). Dependencias gestionadas con pip. Síntoma reportado: "La búsqueda de notas (/notes?q=) devuelve resultados raros con comillas en el texto y a veces rompe la app". El usuario no indicó la consulta exacta que falla, ni el error obtenido, ni el comportamiento esperado de coincidencia (mayúsculas, `%` y `_`), ni restricciones sobre el formato de respuesta, ni cómo verificar. Todo eso queda como pregunta abierta. Mientras tanto se arregla el manejo de comillas sin cambiar el contrato actual del endpoint.
 
 ALCANCE
-- Ruta `/notes` y la función o capa de acceso a datos que construye y ejecuta la consulta de búsqueda en `src/`.
-- Cualquier otro punto de `src/` que comparta la misma construcción de consulta con texto del usuario (se corrige en el código compartido, no con un parche local).
+- Código de `src/` que atiende `GET /notes` con el parámetro `q` y la función o capa de acceso a datos que construye la consulta SQL de búsqueda.
+- Cualquier otro punto de `src/` que comparta esa misma construcción de consulta, para corregir la causa raíz en el camino de código común.
 - Tests de regresión en `tests/`.
 Fuera de alcance:
-- Cambiar el formato de la respuesta de `/notes` o la ruta.
-- Cambiar el esquema de la base de datos o añadir migraciones.
-- Añadir dependencias nuevas (ORM, librerías de búsqueda, FTS) o cambiar las existentes.
-- Rediseñar la búsqueda (ranking, paginación, búsqueda de texto completo).
-- Refactors o arreglos no relacionados con la construcción de la consulta de búsqueda.
+- Cambiar el formato de la respuesta, la ruta `/notes` o el esquema de la base de datos.
+- Añadir dependencias nuevas o cambiar las existentes.
+- Rediseñar la búsqueda (búsqueda de texto completo, paginación, ranking) o añadir funciones nuevas.
+- Refactors no relacionados con el manejo de la consulta de búsqueda.
+- Hacer push o abrir el pull request sin confirmación.
 
 TAREAS
-1. Leer el código actual de la ruta `/notes` y de la función que consulta SQLite en `src/`; localizar cómo se usa `q` en la consulta e identificar si hay otros usos del mismo patrón.
-2. Reproducir el fallo con un test que falle antes del arreglo, en `tests/` (cliente de test de Flask): `q=it's`, `q="hola"`, `q=a"b'c` y un intento de inyección como `q=' OR '1'='1`. Anotar el síntoma observado (error 500, resultados incorrectos).
-3. Corregir la causa raíz en el código compartido: pasar `q` como parámetro de la consulta (`?`) en lugar de interpolarlo en el SQL, sin concatenar nunca el texto del usuario.
-4. Hacer que `%` y `_` en `q` se traten como texto literal escapándolos en el patrón LIKE (con `ESCAPE`), siempre que esto coincida con el comportamiento esperado confirmado en los supuestos.
-5. Manejar `q` ausente o vacío igual que antes del arreglo, sin cambiar el formato de la respuesta.
-6. Ampliar los tests de regresión: comillas simples y dobles encuentran la nota que contiene ese texto, la inyección SQL no devuelve notas que no contienen el texto, `%` y `_` literales, y `q` vacío o ausente mantiene su comportamiento.
-7. Ejecutar la suite completa con `pytest` y comprobar que el test de reproducción ahora pasa y que no hay regresiones.
-8. Si el proyecto tiene versión y changelog, subir la versión y añadir la entrada del arreglo.
+1. Precondiciones: actualiza la rama principal, crea la rama de trabajo y lee el código actual de `src/` (ruta `/notes`, acceso a SQLite y el archivo de tests existente) antes de tocar nada. No relajes ningún control existente.
+2. Localiza en `src/` cómo se construye la consulta SQL de búsqueda con `q` (concatenación, f-string o `%`) y documenta la causa raíz en un comentario del commit o del PR.
+3. Reproduce el fallo con un test que falle en `tests/`: busca con comilla simple (`it's`), comilla doble (`"hola"`) y un intento de inyección como `' OR '1'='1`, y comprueba que hoy devuelven error o resultados incorrectos. Ejecuta `pytest` y confirma que falla por la razón esperada.
+4. Corrige la causa raíz en el código compartido de `src/`: usa consultas parametrizadas (`?` con valores enlazados de sqlite3) y no interpoles nunca `q` en el SQL. Mantén el comportamiento actual de coincidencia y el formato de respuesta.
+5. Si la búsqueda usa `LIKE`, revisa cómo se construye el patrón y decide el tratamiento de `%` y `_` solo si el comportamiento actual lo exige. Si cambias algo, déjalo anotado en 'assumptions' del PR.
+6. Revisa si otros endpoints o funciones de `src/` construyen SQL con entrada del usuario por el mismo método. Corrige solo la ruta compartida de búsqueda y lista el resto como hallazgos, sin ampliar el alcance.
+7. Añade tests de regresión que cubran: comilla simple, comilla doble, mezcla de ambas, cadena vacía o ausencia de `q`, y el intento de inyección SQL, comprobando que no hay error 500 y que el resultado es el esperado.
+8. Ejecuta toda la suite con `pytest` y verifica que los tests previos siguen pasando. Si el proyecto tiene versión y changelog, súbelos y anota el arreglo.
+9. Prepara el resumen para el PR: síntoma, cómo reproducirlo, causa raíz, arreglo y tests. Detente antes del push.
 
 SEGURIDAD
-- No relajar ninguna validación, permiso o control existente en `/notes` ni en el resto de endpoints.
-- Prohibido construir SQL con texto del usuario mediante f-strings, `%`, `.format` o concatenación; solo parámetros enlazados.
-- No registrar en logs ni devolver en errores el SQL completo ni datos de notas de otros usuarios.
-- No introducir secretos, claves ni datos reales en tests o fixtures.
-- Específico de esta petición: el test de inyección SQL debe demostrar que la entrada se trata como dato y no altera la consulta.
+- No debilites ninguna validación, permiso ni control existente en la ruta `/notes`.
+- Prohibido construir SQL concatenando o formateando entrada del usuario; usa siempre parámetros enlazados.
+- No registres en logs ni devuelvas en mensajes de error la consulta SQL ni el contenido completo de `q`; no expongas trazas internas al cliente.
+- No incluyas secretos, rutas de la base de datos ni datos reales de notas en los tests.
+- Las pruebas de inyección SQL deben usar una base de datos de prueba aislada, nunca datos reales.
 
 TESTS
-- Test de regresión (falla antes, pasa después): `GET /notes?q=it's` devuelve 200 y las notas que contienen ese texto.
-- Test con comillas dobles: `q="hola"` devuelve 200 y solo coincidencias literales.
-- Test de inyección: `q=' OR '1'='1` devuelve 200 y no devuelve notas que no contienen ese texto literal.
-- Test de `%` y `_` literales, si el comportamiento esperado se confirma.
-- Test de `q` vacío o ausente: el comportamiento no cambia.
-- Ejecutar `pytest` completo y confirmar que no hay regresiones en los tests existentes.
+- Test de regresión con `q` con comilla simple: la respuesta es 200 y devuelve las notas que contienen ese texto.
+- Test de regresión con comilla doble y con mezcla de ambas: sin error 500 y con resultados correctos.
+- Test de inyección SQL (`' OR '1'='1`, `'; DROP TABLE notes;--`): se trata como texto literal, no devuelve todas las notas y la tabla sigue existiendo.
+- Test sin `q` o con `q` vacío: el comportamiento es el mismo que antes del arreglo.
+- Ejecución de la suite completa con `pytest`: los tests previos no regresan.
 
 CRITERIOS DE ACEPTACIÓN
-- `pytest` termina con código 0 y todos los tests nuevos de búsqueda pasan.
-- El test que reproduce `GET /notes?q=it's` falla en el código original y pasa tras el arreglo.
-- `GET /notes?q="hola"` y `GET /notes?q=it's` devuelven HTTP 200, nunca 500.
-- `GET /notes?q=' OR '1'='1` no devuelve notas que no contengan ese texto literal.
-- Una búsqueda `rg` en `src/` no encuentra SQL de la búsqueda construido con f-strings, `%` o `.format` a partir de `q`.
-- El formato de respuesta, la ruta `/notes` y el esquema de la base de datos no cambian (diff sin cambios en esos puntos).
-- `git diff` no incluye cambios en dependencias.
+- `pytest` termina con código 0 y los nuevos tests de comillas simples, dobles e inyección SQL pasan; antes del arreglo fallaban.
+- `GET /notes?q=it's` y `GET /notes?q="hola"` devuelven HTTP 200 con las notas que contienen ese texto.
+- Con `q=' OR '1'='1` no se devuelven todas las notas, salvo que alguna contenga ese texto literal.
+- En `src/` no queda ninguna consulta de búsqueda que interpole `q` en el SQL; se comprueba con `grep` o revisión del diff.
+- El formato de respuesta, la ruta `/notes` y el esquema de la base de datos no cambian, y no hay dependencias nuevas en el diff.
 
 PUNTOS DE PARADA
-- Antes de hacer push o abrir la pull request.
-- Antes de cualquier acción destructiva (borrar datos, reescribir historial, eliminar archivos).
-- Antes de añadir, quitar o cambiar una dependencia.
-- Si la causa raíz no está en la construcción de la consulta o exige tocar el esquema, el formato de respuesta u otros archivos fuera del alcance.
-- Si no se puede reproducir el fallo con los casos previstos: detenerse y pedir la consulta exacta y el error.
-- Si el directorio de trabajo no es un repositorio git y hace falta crear la rama: confirmar antes de inicializar uno.
+- Antes de hacer push o abrir el pull request.
+- Antes de cualquier acción destructiva, como borrar o migrar datos de la base de datos.
+- Antes de añadir o cambiar una dependencia.
+- Si la causa raíz no es la construcción de la consulta y el arreglo exige tocar algo fuera de `src/` o `tests/`.
+- Si el arreglo obliga a cambiar el formato de la respuesta, la ruta o el esquema de la base de datos.
+- Si encuentras otros endpoints vulnerables: avisa y espera instrucciones antes de corregirlos.
 
 CIERRE
-Trabaja en la rama `fix/notes-search-quotes`, con commits pequeños y mensajes claros. Si el proyecto tiene versión y changelog, súbelos y anota el arreglo. No hagas push ni abras la pull request sin confirmarlo antes conmigo. Cuando la PR esté abierta, avísame y dime cuando el CI esté en verde, con un resumen breve: causa raíz, archivos tocados y tests añadidos.
+Trabaja en una rama nueva, por ejemplo `fix/busqueda-notas-comillas`, creada desde la rama principal actualizada. Haz commits pequeños y descriptivos, pero no hagas push ni abras el pull request sin mi confirmación. Cuando la des, abre el pull request con el síntoma, la causa raíz, el arreglo y los tests añadidos, y avísame cuando la CI esté en verde.
 
 ---
 Suposiciones
-- La búsqueda es una coincidencia literal de subcadena (LIKE) sin distinguir mayúsculas, y `%` y `_` se tratan como texto normal; el usuario no lo confirmó.
-- La causa raíz es interpolación de `q` en el SQL; se verificará al leer el código.
-- Las consultas parametrizadas del módulo estándar `sqlite3` bastan y no se necesitan dependencias nuevas.
-- Los tests de regresión se escriben con pytest y el cliente de test de Flask en `tests/`.
-- El nombre de rama `fix/notes-search-quotes` es una elección propia.
+- La causa raíz es SQL construido por concatenación o formateo de cadenas; se confirma al leer el código.
+- El contrato actual del endpoint (ruta, parámetro `q`, formato de respuesta) es correcto y no debe cambiar.
+- La coincidencia actual es por subcadena con `LIKE`; se mantiene tal cual salvo que se demuestre un fallo.
+- Los tests de regresión se escriben con pytest y el cliente de pruebas de Flask, en `tests/`.
 
 Preguntas abiertas
-- ¿Qué consulta concreta provoca el fallo y qué error o resultado incorrecto se obtiene?
-- ¿Deben `%` y `_` tratarse como texto literal y la búsqueda ignorar mayúsculas?
-- ¿Hay algo que no deba cambiar (formato de respuesta, otros endpoints que usen la misma consulta)?
-- ¿Se prefiere otra forma de verificación además de los tests de regresión con pytest?
+- ¿Qué consulta concreta provoca el fallo (por ejemplo `/notes?q=it's` o `q="hola"`) y qué error o resultado incorrecto se obtiene?
+- ¿Debe la búsqueda ser por subcadena literal, sin distinguir mayúsculas, y tratar `%` y `_` como texto normal?
+- ¿Hay algo que no deba cambiar: formato de respuesta, ruta `/notes`, esquema de la base de datos u otros endpoints que usen la misma consulta?
+- ¿Prefieres otra forma de verificar el arreglo además de los tests de regresión con pytest?
 ```
 
 ## Create (EN)
@@ -100,94 +97,91 @@ Preguntas abiertas
 **Idea:** Añadir exportación de todas las notas a un archivo Markdown desde un nuevo endpoint GET /export.md.  
 **Stack:** Python + Flask + SQLite  
 **Clarification questions:** 5, all skipped  
-**Linter:** 100/100, 0 warnings, 8633 characters  
-**Suggested roles:** developer, tester, security-analyst (all present in the demo project)
+**Linter:** 100/100, 0 warnings, 8985 characters  
+**Suggested roles:** developer, tester, security-analyst, architect (all present in the demo project)
 
 ```text
-Add GET /export.md endpoint exporting all notes as Markdown (Flask + SQLite, demo-notes)
+demo-notes: add GET /export.md endpoint that exports all notes as a Markdown file (prerequisite: existing Flask + SQLite notes app)
 
 OBJECTIVE
-Add a new Flask endpoint GET /export.md to demo-notes that reads all notes from the existing SQLite database and returns them as a single Markdown document, with tests proving its status, content type, content and empty-database behaviour. No existing route, schema or dependency may change.
+Add a new Flask endpoint GET /export.md that reads every note from the existing SQLite database and returns them as a single Markdown document. The minimum that must work first: a GET request to /export.md returns HTTP 200 with a Markdown body containing all notes, in a deterministic order. No existing route, schema or behaviour may change.
 
 CONTEXT
-Stack: Python + Flask + SQLite, dependencies managed with pip, layout src/ and tests/ (about 3 Python files and 1 test file). The app already stores notes in SQLite; the exact note schema, the app factory or module layout and how the DB is accessed are not known yet and must be read from the code first. The user skipped all clarification questions (fields, layout, inline vs download, authentication, escaping, empty-state), so every such choice is listed in assumptions or open_questions. Minimum that must work first: GET /export.md returns HTTP 200 with a Markdown body listing every stored note. Preconditions: update the branch from the main branch, read the current code and tests before editing, never relax an existing control (validation, auth, error handling), add no third-party runtime dependency, and bump the version and update the changelog only if the project already has them.
+Project demo-notes: Python + Flask + SQLite, layout src/ and tests/ (about 3 Python files, 1 test file), dependencies managed with pip. The notes app already exists; this is a new feature on top of it, not a new project. The request was: "Añadir exportación de todas las notas a un archivo Markdown desde un nuevo endpoint GET /export.md". The user skipped all clarification questions (fields, inline vs download, authentication, escaping, empty case), so those choices are recorded as assumptions or open questions below. Before changing anything, read the current code in src/ (the Flask app, the notes model/query code and the existing route style) and tests/ (how the app and database are set up for tests), and follow the existing conventions.
 
 SCOPE
-- New route GET /export.md in the existing Flask app under src/.
-- Small helper that renders a list of notes into a Markdown string, placed in src/ following the existing code layout.
-- Read-only query of all notes from the existing SQLite database using the existing DB access code.
-- Tests for the new endpoint under tests/.
-- Changelog/version entry only if the project already has those files.
+- A new read-only route GET /export.md in the existing Flask app under src/.
+- A small function that reads all notes from SQLite and renders them to a Markdown string, placed where it fits the existing code layout.
+- New tests under tests/ for the endpoint and the rendering.
+- A short note about the new endpoint in the README only if one already exists and documents routes.
 Out of scope:
-- Changing the notes table schema or any migration.
-- Adding, editing or deleting notes, or changing existing routes and their responses.
-- Adding authentication, users, permissions or rate limiting that the app does not already have.
-- Adding dependencies (no Markdown library, no templating package beyond what Flask already provides).
-- Other export formats (JSON, PDF, HTML), pagination, filtering or query parameters.
-- Frontend or UI changes such as an export button.
-- Refactoring unrelated code.
+- Changing the database schema, adding migrations or modifying existing notes data.
+- Changing, renaming or removing existing routes and their behaviour.
+- Adding authentication, users or permissions that the app does not already have.
+- Other export formats (JSON, CSV, PDF), import, filtering, pagination or query parameters.
+- Adding third-party runtime dependencies (for example a Markdown library); use only the standard library and Flask.
+- Front-end or UI changes such as an export button.
 
 TASKS
-1. Read the app entry point, route modules, DB access code and the existing test file under src/ and tests/ to learn the notes schema, how connections are obtained and how tests build the app/client. Report the findings before editing.
-2. Create the branch feature/export-markdown from an up-to-date main branch.
-3. In src/, add a pure function that takes a list of notes and returns a Markdown string: a top-level `# Notes` heading, then one `##` section per note with the title (or a fallback if the note has none), the body unchanged, and the created/updated date only if those columns exist. Use only fields that exist in the schema.
-4. In src/, add a read-only function (or reuse an existing one) that fetches all notes with a parameterized SELECT, ordered deterministically (newest first by created date if present, otherwise by id descending).
-5. Register GET /export.md in the existing Flask app/blueprint: call the query, render the Markdown and return it with status 200 and Content-Type `text/markdown; charset=utf-8`, served inline (no Content-Disposition) unless the answer to the open question says otherwise.
-6. Define the empty-database behaviour: return 200 with only the `# Notes` heading and a single line `No notes yet.` (assumption), never 404 or 500.
-7. In tests/, add tests using the existing fixtures/client for: 200 and content type; every seeded note appears in the body in the expected order; empty database; a note containing Markdown characters and non-ASCII text (e.g. `#`, `*`, `ñ`, emoji) is exported unchanged and without error; only GET is allowed (POST returns 405).
-8. Run the full test suite (pytest) and confirm that existing tests still pass unchanged.
-9. If the project has a README, version file or changelog, add a short entry documenting the endpoint; otherwise do not create them.
+1. Read src/ and tests/ first: identify the Flask app object or factory, how the SQLite connection is obtained, the notes table columns and the existing route and test style. Report which note fields exist before coding.
+2. Add a function (for example render_notes_markdown) in the module that best fits the current layout in src/. It takes the list of notes and returns a Markdown string using only the standard library.
+3. Define the document layout (assumption): a top-level `# Notes` heading, then one `## <title>` section per note, followed by the note body as-is and any date field that already exists in the table. If the table has no title column, use a numbered heading such as `## Note <id>`.
+4. Fetch notes with a parameterized, read-only SELECT ordered deterministically (assumption: by id ascending, or by creation date if that column exists). Reuse the existing database access helper; do not open a second connection style.
+5. Add the route GET /export.md in the existing Flask app/blueprint. Return the Markdown with Content-Type `text/markdown; charset=utf-8`, status 200, and `Content-Disposition: attachment; filename="notes.md"` so it downloads as a file (assumption).
+6. Handle the empty case: with no notes, return 200 and a valid document containing only the `# Notes` heading and a line saying there are no notes (assumption). Never return an error for an empty database.
+7. Keep note content raw (no escaping), except normalise line endings to `\n`; replace newlines in the title with spaces so a title cannot break the document structure.
+8. Write tests in tests/ following the existing fixtures (see TESTS). Run the full test suite and confirm that all pre-existing tests still pass.
+9. Update the README or changelog only if they already exist and cover routes or releases; bump the version only if the project has one.
 
 SECURITY
-- Use only parameterized SQL (or the existing DB helper); never build queries by string concatenation, and keep the endpoint strictly read-only.
-- Do not accept any user input on this endpoint (no query parameters, filenames or paths), so there is no injection or path-traversal surface; do not add any.
-- Do not weaken or bypass any existing authentication, validation, error handling or configuration; if the app has auth or per-user notes, apply the same checks to /export.md and stop to ask.
-- Do not read or write secrets, and do not log note contents.
-- Return the body as plain text/markdown, never as text/html, and do not mark it safe or pass it through a template that renders HTML, to avoid turning stored note content into XSS.
-- Never exports notes belonging to other users if the schema shows an owner column; ask before exporting.
+- Use only parameterized SQL, and only a SELECT; the endpoint must never write to the database.
+- Do not weaken any existing validation, error handling, configuration or access control, and do not add new routes besides GET /export.md.
+- Do not hard-code secrets, paths or database credentials, and do not log note contents.
+- The filename in Content-Disposition must be a fixed constant, never derived from user input, to avoid header injection.
+- Note content is user-provided and is returned as text/markdown (not text/html), so the server must never render it as HTML. If the app already sets security headers, keep them on this route.
+- Because the endpoint exports every note and the user did not say whether the app has authentication, do not invent an access check; if the app already has an auth mechanism for other routes, apply the same one here and flag it in the pull request.
 
 TESTS
-- Endpoint test: GET /export.md returns 200 and a Content-Type starting with `text/markdown` with charset utf-8; proves the contract.
-- Content test: with 3 seeded notes, the body contains each title and body and the notes appear in the documented order; proves completeness and ordering.
-- Empty database test: returns 200 and the documented placeholder; proves no 404/500 on empty data.
-- Special characters test: Markdown symbols and non-ASCII text are preserved byte-for-byte in UTF-8; proves no corruption or crash.
-- Method test: POST/PUT/DELETE on /export.md return 405; proves the endpoint is read-only.
-- Regression: run the whole existing suite with `pytest` and confirm there are no new failures.
+- Endpoint with several notes: GET /export.md returns 200, the content type starts with `text/markdown` and the charset is utf-8, and the body contains the title and body of every inserted note.
+- Order: notes appear in the documented deterministic order (insert them out of order and assert the resulting order).
+- Empty database: GET /export.md returns 200 and the body contains the `# Notes` heading and the no-notes line.
+- Headers: the response has `Content-Disposition` with `attachment` and `filename="notes.md"`.
+- Special content: a note with Markdown symbols, non-ASCII characters (for example accents and emoji) and a newline in the title is exported without error, the body stays raw, and the title stays on one line.
+- Read-only: the number of rows in the notes table is identical before and after the request.
+- Regression: run the whole existing test suite (for example `python -m pytest`) and confirm that nothing that passed before now fails.
 
 ACCEPTANCE CRITERIA
-- `pytest` exits with code 0 and includes at least 5 new tests for /export.md.
-- `curl -i http://127.0.0.1:<port>/export.md` against the running app shows `HTTP/1.1 200` and a `Content-Type: text/markdown; charset=utf-8` header.
-- With N notes in the database, the response body contains exactly N `##` sections, one per note.
-- With an empty database, the response is 200 and the body is exactly `# Notes` followed by `No notes yet.`.
-- `git diff --stat` shows no changes to existing routes, the DB schema or the dependency files (requirements*.txt, pyproject.toml).
-- A POST request to /export.md returns 405.
+- `python -m pytest` exits with code 0, including the new export tests and all pre-existing tests.
+- A GET to /export.md on an app with N notes returns status 200, and the body contains exactly N note sections.
+- The response header Content-Type is `text/markdown; charset=utf-8` and Content-Disposition is `attachment; filename="notes.md"`.
+- A GET to /export.md on an empty database returns status 200 with a non-empty valid Markdown body.
+- `git diff --stat` shows changes only under src/ and tests/ (plus README or changelog/version file if they already exist); no new entry in the dependency file.
+- No existing route changes its status code or response in the existing tests.
 
 STOP POINTS
-- Stop and ask before any push or opening the pull request.
-- Stop and ask before adding or changing any dependency (requirements files, pyproject).
-- Stop and ask if the schema shows users, owners or an authentication mechanism, since access rules for the export are undecided.
-- Stop and ask before changing the DB schema, existing routes or any file outside src/ and tests/ (except an existing changelog/README).
-- Stop and ask before any destructive action (deleting files or data, resetting the database, rewriting git history).
-- Stop and ask if the notes schema lacks a usable text field to export.
+- Stop and ask before any push, merge or opening of the pull request, and before any commit if it was not requested.
+- Stop and ask before adding, removing or upgrading any dependency (pip requirements included).
+- Stop and ask before any schema change, migration or write to the database.
+- Stop and ask if the notes table lacks the fields needed to build a sensible document, or if the app turns out to have authentication or per-user notes, since that changes who may export what.
+- Stop and ask before touching any file outside src/, tests/ and an existing README or changelog.
 
 CLOSING
-Work on a branch named feature/export-markdown. Do not commit to main directly. When the work is done, open a pull request titled "Add GET /export.md Markdown export of all notes" describing the format chosen and the assumptions made, and tell me when CI is green. Do not push before I confirm.
+Work on a new branch named feature/export-markdown, created from an up-to-date main branch. Do not commit or push without asking. When the work is finished, open a pull request titled "Add GET /export.md endpoint" describing the assumptions made, and tell me when CI is green. If the project has a version number or a changelog, bump the version and add a changelog entry; if it has neither, do not create them.
 
 ---
 Assumptions
-- Output format: `# Notes` heading, then one `## <title>` section per note with the raw body below it and, if available, the date; only columns that exist in the schema are used.
-- Order: newest first by created date if the column exists, otherwise by id descending.
-- Served inline with Content-Type `text/markdown; charset=utf-8` and no Content-Disposition header, since the user did not ask for a download.
-- No access check is added because no authentication was mentioned; the endpoint exports every note in the database.
-- Note content is exported raw (not escaped), since the file is meant to be Markdown generated from the user's own notes.
-- Empty database returns 200 with the heading and `No notes yet.` instead of 404.
-- Tests use pytest with the Flask test client, in line with the existing test file.
-- The branch is named feature/export-markdown and the main branch is called main.
+- Fields exported: the note title (or an id-based heading if there is no title), the body, and a date only if a date column already exists in the table.
+- Layout: one `# Notes` top-level heading and one `## <title>` section per note, ordered by id ascending (or creation date if present).
+- The response is a download (Content-Disposition attachment, filename notes.md) with content type `text/markdown; charset=utf-8`.
+- The endpoint exports every note in the database, with no new access check, because no authentication or per-user ownership was mentioned.
+- Note content is exported raw (not escaped); only line endings are normalised and newlines in titles are replaced by spaces.
+- An empty database returns 200 with a heading and a no-notes message rather than 404 or an empty body.
+- Only the standard library and Flask are used; tests use the framework already used in tests/ (assumed pytest).
 
 Open questions
-- Which note fields should be exported (title, body, created/updated dates, tags) and what is the exact layout and order wanted?
-- Should /export.md open inline in the browser or download as an attachment with a filename (e.g. notes.md)?
-- Are notes tied to users or is there authentication; should the endpoint be restricted or export every note?
-- Should Markdown syntax or special characters inside notes be kept raw or escaped?
-- What should be returned when there are no notes: empty file, a placeholder message or 404?
+- Which note fields should appear in the export (title, body, created/updated dates, tags) and in what order?
+- Should the file download (attachment) or display inline in the browser?
+- Does the app have users or authentication, and should the export be restricted or limited to the current user's notes?
+- Should Markdown syntax in note content be kept raw or escaped?
+- What should the endpoint return when there are no notes: empty file, placeholder message, or 404?
 ```
