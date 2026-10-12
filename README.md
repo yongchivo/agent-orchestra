@@ -266,9 +266,9 @@ the enum, validated on the server, and reach the CLI as separate arguments.
 project-context editor, the raw event log and the publish helper, plus backend, parallelism
 and correction rounds next to the chat.
 
-![New run form](docs/ui-form.jpg)
+![Parallel run form (advanced mode)](docs/ui-form.jpg)
 
-**New run**: repository path (typed, with a list of recent repositories), backend, parallelism
+**Parallel run** (advanced mode): the project selector or a typed path, backend, parallelism
 and a task editor where each task has a name, prompt, `max_turns`, a permission preset
 (`readonly` or `edit`, the core's presets, never free-text tools) and a required `paths` list.
 Templates are saved under `~/.uno-orchestra/runs/<name>.json` and validated with the same
@@ -283,12 +283,13 @@ schema when loaded. Before Start the server reports:
 
 ![Run in progress](docs/ui-running.jpg)
 
-**Run**: one card per agent with live progress and the message bus underneath, streamed with
-`fetch()` so the token travels in a header. Stop kills every agent's process group.
+**Run**: one node per agent in *Live agents* with its model, progress, status and last message,
+pulses for every message, and the raw event log in advanced mode, streamed with `fetch()` so
+the token travels in a header. Stop kills every agent's process group.
 
 ![Results](docs/ui-results.jpg)
 
-**Results**: per agent, the gate verdict (`merged`, `out_of_scope`, `needs_review`, `conflict`,
+**Results** (advanced mode): per agent, the gate verdict (`merged`, `out_of_scope`, `needs_review`, `conflict`,
 `failed`), the files and the reason, and the diff of its branch rendered as plain text. For
 anything the gate rejected there is no merge button, by design: the page shows the exact
 `git diff` and `git merge` commands to review and merge by hand. **Publish** opens
