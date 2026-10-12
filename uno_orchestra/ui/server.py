@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from uno_orchestra import __version__, config, orchestrator, pipeline, roles as roles_mod, scope, worktree
+from uno_orchestra import __version__, config, models, orchestrator, pipeline, roles as roles_mod, scope, worktree
 from uno_orchestra.bus import EventBus
 from uno_orchestra.worker import NAME_RE, OUTPUTS, PRESETS, Task
 
@@ -53,7 +53,7 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_BODY = 64 * 1024
 MAX_DIFF = 200 * 1024
 BACKENDS = ("mock", "claude")
-TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns", "output"}
+TASK_FIELDS = {"name", "prompt", "paths", "preset", "max_turns", "output", "model", "effort"}
 MAX_CHAT = 4000
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$")
 RECENT_MAX = 10
@@ -95,7 +95,8 @@ def parse_tasks(raw):
                 raise ValueError(f"task {i}: '{key}' is required")
         tasks.append(Task(str(t["name"]), str(t["prompt"]), t["paths"],
                           str(t.get("preset", "edit")), t.get("max_turns", 20),
-                          output=str(t.get("output", "text"))))
+                          output=str(t.get("output", "text")),
+                          model=t.get("model"), effort=t.get("effort")))
     if len({t.name for t in tasks}) != len(tasks):
         raise ValueError("task names must be unique")
     return tasks
@@ -186,6 +187,8 @@ class Chat:
         self.offset = 0
         self.history = []            # pipeline.state_summary() per finished run, for re-planning
         self.fingerprint = None      # the .uno/ snapshot the loaded roles came from
+        self.overrides = {}          # {role: {model, effort}} for this session's runs only
+        self.planner = None          # (model, effort) for the planner: settings, or this session's choice
 
     def say(self, who, text):
         self.transcript.append({"who": who, "text": str(text)[:4000], "ts": round(time.time(), 3)})
@@ -232,9 +235,17 @@ class Chat:
         roles, context, fp = roles_mod.load_confirmed(repo, self.srv.state_dir)
         if not roles:
             raise ValueError("the repository has no roles: install the templates or create one first")
+        overrides = pipeline.check_overrides(body.get("overrides"), roles)
+        cfg = config.load(self.srv.state_dir)
+        planner = body.get("planner") or {}
+        if not isinstance(planner, dict) or set(planner) - {"model", "effort"}:
+            raise ValueError("planner: only 'model' and 'effort' are allowed")
+        planner = (planner.get("model", cfg["planner_model"]), planner.get("effort", cfg["planner_effort"]))
+        models.check(*planner)
         self.__init__(self.srv)
         self.repo, self.backend, self.parallel, self.max_iterations = repo, backend, parallel, iters
         self.roles, self.project_context, self.fingerprint = roles, context, fp
+        self.overrides, self.planner = overrides, planner
         self.srv.remember_repo(repo)
 
     def _plan(self, request):
@@ -244,8 +255,12 @@ class Chat:
             try:
                 raw = pipeline.propose(request, self.roles, self.project_context, self.backend,
                                        self.transcript[:-1], history, rejected, cwd=str(self.srv.state_dir),
-                                       auth=config.auth_mode(self.srv.state_dir))
+                                       auth=config.auth_mode(self.srv.state_dir),
+                                       model=self.planner[0], effort=self.planner[1])
                 summary, steps = pipeline.validate_plan(raw, self.roles)
+                for st in steps:   # effective model/effort, shown in the plan before approval
+                    o = self.overrides.get(st.role, {})
+                    st.model, st.effort = o.get("model", self.roles[st.role].model), o.get("effort", self.roles[st.role].effort)
             except pipeline.PlanError as exc:
                 rejected = str(exc)
                 continue
@@ -282,7 +297,7 @@ class Chat:
             max_parallel=self.parallel, max_iterations=self.max_iterations,
             timeout=self.srv.agent_timeout, state_dir=self.srv.state_dir,
             project_context=self.project_context, base_ref=self.branch or "HEAD", base=self.base,
-            on_question=lambda q: self._question(q))
+            on_question=lambda q: self._question(q), overrides=self.overrides)
         self.loop = asyncio.new_event_loop()
         self.task = self.loop.create_task(self.engine.run())
         self.state = "running"
@@ -384,7 +399,8 @@ class Chat:
         out = {"state": self.state, "transcript": self.transcript, "plan": plan,
                "repo": str(self.repo) if self.repo else None, "backend": self.backend,
                "branch": self.branch, "offset": self.offset, "error": self.error,
-               "max_iterations": self.max_iterations,
+               "max_iterations": self.max_iterations, "overrides": self.overrides,
+               "planner": {"model": self.planner[0], "effort": self.planner[1]} if self.planner else None,
                "limits": {"steps": pipeline.MAX_STEPS, "iterations": pipeline.MAX_ITERATIONS,
                           "duration": pipeline.MAX_DURATION}}
         if self.engine:
@@ -565,6 +581,9 @@ class UIServer(ThreadingHTTPServer):
                          and e["kind"] in ("merge", "conflict", "out_of_scope", "needs_review")), None)
             failed = next((e for e in reversed(events) if e.get("source") == t.name and e["kind"] == "failed"), None)
             detail = (failed or gate or {}).get("message", "")
+            ended = next((e for e in reversed(events) if e.get("source") == t.name and e["kind"] in ("done", "failed")), {})
+            usage = {k: ended.get(k) for k in ("model", "effort", "model_used", "turns", "seconds")}
+            usage["model"], usage["effort"] = t.model, t.effort
             branch = f"agent/{run_id}/{t.name}" if run_id else None
             diff, commands = "", []
             if branch and worktree.git(repo, "rev-parse", "--verify", "-q", branch, check=False).returncode == 0:
@@ -574,7 +593,8 @@ class UIServer(ThreadingHTTPServer):
                     commands = [f"git -C {repo} diff {run['base'][:12]} {branch}",
                                 f"git -C {repo} merge --no-ff {branch}"]
             agents.append({"name": t.name, "verdict": verdict, "detail": detail, "paths": t.paths,
-                           "preset": t.preset, "branch": branch, "diff": diff, "commands": commands})
+                           "preset": t.preset, "branch": branch, "diff": diff, "commands": commands,
+                           "usage": usage})
         return {"run_id": run_id, "repo": str(repo), "branch": run["branch"], "backend": run["backend"],
                 "base": run["base"], "error": run["error"], "summary": run["summary"],
                 "steering": run["steering"], "agents": agents,
@@ -817,7 +837,9 @@ class Handler(BaseHTTPRequestHandler):
                 "presets": sorted(PRESETS), "limits": {"parallel": orchestrator.MAX_PARALLEL,
                                                         "tasks": orchestrator.MAX_TASKS},
                 "idle_timeout": srv.idle_timeout, "state_dir": str(srv.state_dir),
-                "auth": config.auth_mode(srv.state_dir)})
+                "auth": config.auth_mode(srv.state_dir), "models": models.catalog(),
+                "planner": {"model": config.load(srv.state_dir)["planner_model"],
+                            "effort": config.load(srv.state_dir)["planner_effort"]}})
         if path == "/api/results":
             run = srv.run
             if not run or not run.get("results"):

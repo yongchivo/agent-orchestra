@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, orchestrator, roles as roles_mod, scope, state, worktree
+from . import config, models, orchestrator, roles as roles_mod, scope, state, worktree
 from .worker import FINDINGS_SCHEMA, Task, Worker, agent_env, write_agent_config
 
 MAX_STEPS = 8
@@ -67,6 +67,24 @@ class PlanError(ValueError):
     pass
 
 
+def check_overrides(raw, roles):
+    """{role: {"model": ..., "effort": ...}} for one run: known roles only, values from the
+    allowlist only (an enum validated here, never free text towards the CLI)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("overrides must be an object keyed by role name")
+    out = {}
+    for name, o in raw.items():
+        if name not in roles:
+            raise ValueError(f"override for unknown role {name!r}")
+        if not isinstance(o, dict) or set(o) - {"model", "effort"}:
+            raise ValueError(f"override for {name!r}: only 'model' and 'effort' are allowed")
+        models.check(o.get("model", roles[name].model), o.get("effort", roles[name].effort))
+        out[name] = {k: o[k] for k in ("model", "effort") if k in o}
+    return out
+
+
 # --- plan ------------------------------------------------------------------------------------
 
 @dataclass
@@ -85,12 +103,16 @@ class Step:
     summary: str = ""
     detail: str = ""
     feedback: list = field(default_factory=list)   # findings handed back by reviewers
+    model: str = None            # effective for this run: the role's, or the per-run override
+    effort: str = None
+    usage: dict = field(default_factory=dict)      # Worker.usage() of the last attempt
 
     def snapshot(self):
         return {"id": self.id, "role": self.role, "goal": self.goal, "paths": self.paths,
                 "depends_on": self.depends_on, "status": self.status, "iteration": self.iteration,
                 "branch": self.branch, "files": self.files, "findings": self.findings,
-                "summary": self.summary, "detail": self.detail}
+                "summary": self.summary, "detail": self.detail, "model": self.model, "effort": self.effort,
+                "profile": models.profile_of(self.model, self.effort), "usage": self.usage}
 
 
 def _covered(path, globs):
@@ -175,10 +197,14 @@ def planner_system_prompt(roles, project_context, max_steps=MAX_STEPS):
     return "\n".join(lines)
 
 
-def planner_command(request, system, max_turns=3, env=None, auth="account"):
+def planner_command(request, system, max_turns=3, env=None, auth="account", model=None, effort=None):
     """Claude with no tools at all, structured JSON output, nothing from the repository."""
     env = agent_env(auth=auth) if env is None else env
-    cmd = ["claude", "-p", request, "--output-format", "json",
+    default = models.default_for("planner")
+    model = default[0] if model is None else model   # only None means "default": "" is rejected below
+    effort = default[1] if effort is None else effort
+    models.check(model, effort)
+    cmd = ["claude", "-p", request, "--output-format", "json", "--model", model, "--effort", effort,
            "--json-schema", json.dumps(PLAN_SCHEMA), "--system-prompt", system,
            "--tools", "", "--allowedTools", "", "--disallowedTools", "Bash,WebFetch,WebSearch,mcp__*",
            "--restricted", "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
@@ -225,7 +251,7 @@ def planner_prompt(request, transcript=(), history=(), rejected=None):
 
 
 def propose(request, roles, project_context, backend="claude", transcript=(), history=(),
-            rejected=None, cwd=None, auth="account"):
+            rejected=None, cwd=None, auth="account", model=None, effort=None):
     """Ask the planner for a raw plan dict. The mock backend returns a JSON message verbatim
     (so a user or a test can hand it a plan) or a developer -> reviewers chain."""
     if backend == "mock":
@@ -245,7 +271,7 @@ def propose(request, roles, project_context, backend="claude", transcript=(), hi
     system = planner_system_prompt(roles, project_context)
     prompt = planner_prompt(request, transcript, history, rejected)
     try:
-        r = subprocess.run(planner_command(prompt, system, auth=auth), env=agent_env(auth=auth), cwd=cwd,
+        r = subprocess.run(planner_command(prompt, system, auth=auth, model=model, effort=effort), env=agent_env(auth=auth), cwd=cwd,
                            capture_output=True, text=True, timeout=PLANNER_TIMEOUT, check=False,
                            stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -340,9 +366,15 @@ class Pipeline:
 
     def __init__(self, repo, roles, steps, bus, backend="claude", *, max_parallel=2,
                  max_iterations=DEFAULT_ITERATIONS, timeout=900, state_dir=None,
-                 project_context="", base_ref="HEAD", base=None, on_question=None):
+                 project_context="", base_ref="HEAD", base=None, on_question=None, overrides=None):
         if not 1 <= max_iterations <= MAX_ITERATIONS:
             raise ValueError(f"max_iterations must be 1..{MAX_ITERATIONS}")
+        # Model and effort per step: the role's, or this run's override (the role file is untouched).
+        overrides = check_overrides(overrides, roles)
+        for s in steps:
+            role = roles[s.role]
+            o = overrides.get(s.role, {})
+            s.model, s.effort = o.get("model", role.model), o.get("effort", role.effort)
         if not 1 <= max_parallel <= orchestrator.MAX_PARALLEL:
             raise ValueError(f"max_parallel must be 1..{orchestrator.MAX_PARALLEL}")
         if not 1 <= len(steps) <= MAX_STEPS:
@@ -485,11 +517,13 @@ class Pipeline:
         s.start = worktree.head(self.int_path)
         path, s.branch = worktree.create(self.repo, self.run_dir, self.run_id, s.id, s.start)
         prompt = compose_prompt(s, role, self.project_context, self._artifacts(s))
-        task = Task(s.id, prompt, s.paths, role.preset, role.max_turns, output=role.output)
+        task = Task(s.id, prompt, s.paths, role.preset, role.max_turns, output=role.output,
+                    model=s.model, effort=s.effort)
         w = Worker(task, path, s.branch, self.bus, self.backend, self.timeout, self.config_dir, auth=self.auth)
         w.round = s.iteration
         self.workers[s.id] = w
         await w.run()
+        s.usage = w.usage()
         if w.status != "done":
             s.status, s.detail = "failed", "the agent failed or timed out"
             return

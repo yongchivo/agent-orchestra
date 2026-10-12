@@ -76,6 +76,10 @@
       <label><span data-i18n="chat.iters">rondas de corrección</span> <input id="iters" type="number" min="1" max="5" value="2"></label>
       <span class="hint" data-i18n="chat.iters.hint"></span>
     </div>
+    <div class="knobs overrides" data-adv>
+      <div class="hint" data-i18n="chat.overrides.hint"></div>
+      <table id="overrides"><tbody></tbody></table>
+    </div>
   </section>
 
   <section id="agentsPanel" class="panel">
@@ -116,6 +120,7 @@
       <div class="row actions" id="planActions">
         <button id="pApprove" type="button" class="primary" data-i18n="review.approve">Aprobar plan</button>
         <button id="pReject" type="button" class="ghost" data-i18n="review.reject">Rechazar</button>
+        <span id="maxNote" class="hint warn" hidden data-i18n="review.maxNote"></span>
         <span class="hint" data-i18n="review.approve.hint"></span>
       </div>
     </div>
@@ -206,10 +211,13 @@
           <select id="r-preset"><option value="edit" data-i18n="roles.canEdit">puede modificar archivos</option><option value="readonly" data-i18n="roles.readonly">solo lee</option></select>
         </label>
         <label class="grow"><span data-i18n="roles.folders">en qué carpetas trabaja</span> <input id="r-paths" placeholder="src/** tests/**" autocomplete="off" spellcheck="false"></label>
+        <label data-simple><span data-i18n="roles.profile">potencia</span> <select id="r-profile"></select></label>
       </div>
       <div data-adv>
         <label><span data-i18n="adv.r.desc">descripción</span> <input id="r-desc" autocomplete="off"></label>
         <div class="row">
+          <label><span data-i18n="roles.model">modelo</span> <select id="r-model"></select></label>
+          <label><span data-i18n="roles.effort">esfuerzo</span> <select id="r-effort"></select></label>
           <label>output <select id="r-output"><option value="text">text</option><option value="findings">findings (JSON)</option></select></label>
           <label>max_turns <input id="r-turns" type="number" min="1" max="50" value="20"></label>
         </div>

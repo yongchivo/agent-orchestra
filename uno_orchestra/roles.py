@@ -13,14 +13,14 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import scope
+from . import models, scope
 from .worker import MAX_TURNS, NAME_RE, PRESETS
 
 DIR = ".uno"
 LEGACY_DIR = ".orchestra"   # the name before 0.1.0; still protected, migrated by `uno init`
 OUTPUTS = ("text", "findings")
 ROLE_FIELDS = {"name", "description", "instructions", "preset", "paths", "output",
-               "output_format", "max_turns"}
+               "output_format", "max_turns", "model", "effort"}
 MAX_TEXT = {"description": 300, "instructions": 4000, "output_format": 1000}
 MAX_PATHS = 20
 MAX_ROLES = 12
@@ -45,10 +45,19 @@ class Role:
     output: str = "text"
     output_format: str = ""
     max_turns: int = 20
+    model: str = None    # None: the profile models.json assigns to this role name
+    effort: str = None
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not NAME_RE.match(self.name):
             raise ValueError(f"invalid role name {self.name!r}: use a-z, 0-9 and '-'")
+        default = models.default_for(self.name)
+        self.model = default[0] if self.model is None else self.model
+        self.effort = default[1] if self.effort is None else self.effort
+        try:
+            models.check(self.model, self.effort)
+        except ValueError as exc:
+            raise ValueError(f"role {self.name!r}: {exc}") from exc
         for key, cap in MAX_TEXT.items():
             v = getattr(self, key)
             if not isinstance(v, str) or len(v) > cap:

@@ -96,7 +96,7 @@ ignored. In `api-key` mode the agents also run with `--bare` (see Security contr
 | `uno run tasks.json [--repo .] [--backend claude\|mock] [--parallel 3]` | Parallel mode from the terminal; events go to `~/.uno-orchestra/events.jsonl` |
 | `uno doctor [PATH]` | One check per prerequisite with the fix for each failure; exit code 1 when any check fails |
 | `uno dashboard [--events FILE] [--port 8765]` | Live dashboard tailing the event log |
-| `uno config [get KEY \| set KEY VALUE]` | Settings in `~/.uno-orchestra/config.json` (0600). `auth`: `account` (default, the Claude CLI login) or `api-key` |
+| `uno config [get KEY \| set KEY VALUE]` | Settings in `~/.uno-orchestra/config.json` (0600). `auth`: `account` (default, the Claude CLI login) or `api-key`; `planner_model`, `planner_effort`: what the orchestrator's planner runs with |
 | `uno --version`, `uno <command> -h` | Version and per-command help |
 
 Every command takes `--state-dir DIR` (default `~/.uno-orchestra`).
@@ -234,6 +234,22 @@ change from the UI is confirmed in the fingerprint while edits made by hand in t
 still ask for confirmation. `uno init` offers the same: after the proposals, a [n]ew role or one
 from your [t]emplates.
 
+**Model and effort.** `uno_orchestra/models.json` is the single list of models, effort levels
+and profiles; edit it when the CLI or your subscription changes (it was verified against
+Claude Code 2.1.296, whose flags are `--model <alias|full name>` and `--effort
+low|medium|high|xhigh|max`, and against the account login: `fable`, `opus`, `sonnet`,
+`haiku`). Each role has its own `model` and `effort`; the planner's are `uno config set
+planner_model …` / `planner_effort …`. In simple mode the role editor offers three profiles
+(⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = fable/max; defaults: planner and
+`security-analyst` Max, `architect` and `developer` Balanced, `tester` Fast). Advanced mode
+sets the exact pair per role and, next to the chat, an override for the next run only
+(nothing is written to the role). A note next to Approve warns when the plan uses Max
+profiles, which eat more of the subscription's limit. Every `start` event and every result
+records the model and effort requested, the model the CLI actually reported, the turns and
+the seconds, so runs can be compared. A model the CLI rejects is a clear error with the
+alternatives, never a silent switch. Model and effort only ever come from the allowlist and
+the enum, validated on the server, and reach the CLI as separate arguments.
+
 **Advanced mode** adds everything below: the parallel-run form, templates, the roles and
 project-context editor, the raw event log and the publish helper, plus backend, parallelism
 and correction rounds next to the chat.
@@ -307,6 +323,7 @@ paste; the UI never pushes or runs `gh`.
 | A brand file that is not an image, too big, or outside the brand directory | fixed routes to fixed names, PNG signature, 1 MiB cap, regular file inside the directory, `image/png` + `nosniff`, 404 otherwise | `test_brand_pngs_are_served_only_from_the_allowlist`, `test_svg_or_oversized_brand_file_is_refused`, `test_without_a_brand_directory_the_ui_is_neutral` |
 | HTML in a translation, or the mode loosening a rule | dictionaries rendered with `textContent`; the mode is a CSS class, the server validates the same fields and limits | `test_i18n_dictionaries_are_static_and_rendered_as_text`, `test_simple_mode_is_a_css_class_and_changes_no_permission_or_limit` |
 | A role renamed or deleted under a running plan, too many roles, a tampered personal template | the server refuses while a plan using the role is proposed or running; 12 roles per project in the core; templates pass the same strict schema, invalid ones are skipped; built-ins cannot be deleted | `test_role_in_a_pending_or_running_plan_cannot_be_renamed_or_deleted`, `test_role_rename_duplicate_limit_and_protected_paths`, `test_personal_template_library` (`tests/test_pipeline.py`) |
+| Argument injection through the model or effort, or a silent model switch | both are an enum from `models.json`, validated in `Task`, `Role`, the overrides and the planner, passed as separate argv elements; a CLI rejection is reported as such | `test_model_and_effort_only_from_the_allowlist`, `test_run_override_leaves_the_role_untouched_and_is_recorded`, `test_unavailable_model_is_a_clear_error` (`tests/test_pipeline.py`) |
 | Token persisted by the page, or a weaker CSP | `localStorage` holds language, mode and project only; the CSP is asserted byte for byte | `test_localstorage_never_holds_the_token`, `test_csp_is_unchanged_or_stricter` |
 
 **Manual verification against a live server**

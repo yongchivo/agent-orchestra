@@ -247,7 +247,7 @@
     if (status) { a.status = status; a.node.className = 'node ' + status + (a.orc ? ' orc' : ''); a.node.querySelector('.chip').replaceWith(chip(status)); }
     if (pct !== undefined) { a.pct = Math.max(a.pct, pct); a.node.querySelector('.pct').textContent = a.pct + '%'; a.node.querySelector('.bar i').style.width = a.pct + '%'; }
     if (label) a.node.querySelector('.task').textContent = label;
-    const role = roleOf.get(name); if (role) a.node.querySelector('.role').textContent = role;
+    const role = roleOf.get(name); if (role && !a.node.querySelector('.role').textContent) a.node.querySelector('.role').textContent = role;
   }
   function pulse(from, to) {
     const a = agents.get(from), b = agents.get(to);
@@ -277,10 +277,10 @@
         Object.entries(e.roles || {}).forEach(([w, r]) => roleOf.set(w, r));
         setAgent('orchestrator', 'running', undefined, e.message); (e.workers || []).forEach(w => nodeFor(w));
         lastRun = { id: e.run_id, backend: e.backend }; $('liveTitle').textContent = t('agents.run', lastRun); break;
-      case 'start': setAgent(e.source, 'running', 0, e.message); pulse('orchestrator', e.source); break;
+      case 'start': setAgent(e.source, 'running', 0, e.message); if (e.model) nodeFor(e.source).node.querySelector('.role').textContent = `${roleOf.get(e.source) || ''} · ${e.model} · ${e.effort}`.replace(/^ · /, ''); pulse('orchestrator', e.source); break;
       case 'progress': setAgent(e.source, 'running', e.progress); return;  // shown on the node only
       case 'tool': case 'say': setAgent(e.source, undefined, undefined, e.message); break;
-      case 'done': setAgent(e.source, 'done', 100, e.message); pulse(e.source, 'orchestrator'); break;
+      case 'done': setAgent(e.source, 'done', 100, e.message); if (e.model) nodeFor(e.source).node.querySelector('.role').textContent = `${roleOf.get(e.source) || ''} · ${usageText(e)}`.replace(/^ · /, ''); pulse(e.source, 'orchestrator'); break;
       case 'failed': setAgent(e.source, 'failed', undefined, e.message); break;
       case 'conflict': case 'out_of_scope': case 'needs_review': setAgent(e.target, e.kind, undefined, e.message); pulse('orchestrator', e.target); break;
       case 'merge': setAgent(e.target, 'merged', 100, e.message); pulse('orchestrator', e.target); break;
@@ -365,6 +365,7 @@
       const head = el('div', 'head');
       head.appendChild(chip(a.verdict)); head.appendChild(el('b', '', a.name));
       head.appendChild(el('span', 'hint', `preset ${a.preset} · paths ${a.paths.join(' ')} · ${a.branch || '—'}`));
+      if (a.usage) head.appendChild(el('span', 'usage', usageText(a.usage)));
       card.appendChild(head);
       if (a.detail) card.appendChild(el('div', 'detail', a.detail));
       if (a.commands.length) {
@@ -377,13 +378,33 @@
     if (scroll) { setMode('advanced'); $('results').scrollIntoView({ behavior: 'smooth' }); }
   }
 
+  // --- models, efforts and profiles: the catalog comes from the server (models.json) --------
+  let catalog = { models: [], efforts: [], profiles: {}, role_defaults: {} };
+  const profileOf = (model, effort) => Object.keys(catalog.profiles).find(n => catalog.profiles[n].model === model && catalog.profiles[n].effort === effort) || '';
+  const defaultPair = name => catalog.profiles[catalog.role_defaults[name] || catalog.role_defaults['*']] || { model: '', effort: '' };
+  function modelSelect(sel, value) {
+    clear(sel); catalog.models.forEach(m => { const o = el('option', '', m.label || m.id); o.value = m.id; sel.appendChild(o); });
+    sel.value = value;
+  }
+  function effortSelect(sel, value) {
+    clear(sel); catalog.efforts.forEach(e => sel.appendChild(el('option', '', e)).value = e);
+    sel.value = value;
+  }
+  function profileSelect(sel, value) {
+    clear(sel); Object.keys(catalog.profiles).forEach(n => { const o = el('option', '', t('profile.' + n)); o.value = n; sel.appendChild(o); });
+    const custom = el('option', '', t('profile.custom')); custom.value = ''; custom.disabled = true; sel.appendChild(custom);
+    sel.value = value;
+  }
+  const usageText = u => u && u.model ? `${u.model_used || u.model} · ${u.effort}` + (u.turns ? ` · ${u.turns} ${t('usage.turns')}` : '') + (u.seconds != null ? ` · ${u.seconds}s` : '') : '';
+
   // --- roles (dialog, both modes) & project context (.uno/ in the repository) --------------
   let rolesData = { roles: [] };
   const R = { name: 'r-name', preset: 'r-preset', output: 'r-output', max_turns: 'r-turns',
               description: 'r-desc', instructions: 'r-instr', output_format: 'r-format', paths: 'r-paths' };
   function fillRole(role) {
-    const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [] };
+    const r = role || { name: '', preset: 'edit', output: 'text', max_turns: 20, description: '', instructions: '', output_format: '', paths: [], ...defaultPair('*') };
     for (const [k, id] of Object.entries(R)) $(id).value = k === 'paths' ? (r.paths || []).join(' ') : (r[k] ?? '');
+    modelSelect($('r-model'), r.model); effortSelect($('r-effort'), r.effort); profileSelect($('r-profile'), profileOf(r.model, r.effort));
     $('r-newname').value = '';
   }
   function readRole() {
@@ -391,7 +412,38 @@
     for (const [k, id] of Object.entries(R)) r[k] = $(id).value;
     r.name = r.name.trim(); r.max_turns = parseInt(r.max_turns, 10) || 0;
     r.paths = r.paths.split(/[\s,]+/).filter(Boolean);
+    // Simple mode: the profile decides; advanced: the exact pair. Both are catalog values only.
+    const simple = document.body.classList.contains('simple'), prof = catalog.profiles[$('r-profile').value];
+    r.model = simple && prof ? prof.model : $('r-model').value;
+    r.effort = simple && prof ? prof.effort : $('r-effort').value;
     return r;
+  }
+  $('r-profile').addEventListener('change', () => { const p = catalog.profiles[$('r-profile').value]; if (p) { $('r-model').value = p.model; $('r-effort').value = p.effort; } });
+  ['r-model', 'r-effort'].forEach(id => $(id).addEventListener('change', () => { $('r-profile').value = profileOf($('r-model').value, $('r-effort').value); }));
+
+  // Per-run overrides (advanced): the planner row plus one row per role, prefilled from the saved values.
+  function renderOverrides() {
+    const tb = $('overrides').querySelector('tbody'); const prev = readOverrides(); clear(tb);
+    const row = (key, label, model, effort) => {
+      const tr = el('tr'); tr.dataset.key = key; tr.appendChild(el('td', '', label));
+      const ms = el('select', 'ov-model'); modelSelect(ms, (prev[key] || {}).model || model); tr.appendChild(el('td')).appendChild(ms);
+      const es = el('select', 'ov-effort'); effortSelect(es, (prev[key] || {}).effort || effort); tr.appendChild(el('td')).appendChild(es);
+      tb.appendChild(tr);
+    };
+    const planner = (statusData.planner || defaultPair('planner'));
+    row('*planner', t('chat.planner'), planner.model, planner.effort);
+    (rolesData.roles || []).forEach(r => row(r.name, r.name, r.model, r.effort));
+  }
+  function readOverrides() {
+    const out = {};
+    $('overrides').querySelectorAll('tr').forEach(tr => { out[tr.dataset.key] = { model: tr.querySelector('.ov-model').value, effort: tr.querySelector('.ov-effort').value }; });
+    return out;
+  }
+  function runSettings() {
+    const all = readOverrides(), planner = all['*planner']; delete all['*planner'];
+    const overrides = {};
+    (rolesData.roles || []).forEach(r => { const o = all[r.name]; if (o && (o.model !== r.model || o.effort !== r.effort)) overrides[r.name] = o; });
+    return { overrides, planner: planner || undefined };
   }
   function renderRoles() {
     const sel = $('roleList'); const current = sel.value; clear(sel);
@@ -415,6 +467,7 @@
       ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
       Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
     $('rolesOpen').disabled = !$('repo').value.trim();
+    renderOverrides();
     renderProjectState();
   }
   async function loadRoles() {
@@ -494,7 +547,9 @@
       plan.steps.forEach((s, i) => {
         const tr = el('tr');
         tr.appendChild(el('td', '', String(i + 1)));
-        tr.appendChild(el('td', 'mono', s.id)); tr.appendChild(el('td', '', s.role)); tr.appendChild(el('td', 'goal', s.goal));
+        tr.appendChild(el('td', 'mono', s.id));
+        const roleTd = el('td', '', s.role); if (s.model) roleTd.appendChild(el('div', 'usage', usageText(s.usage && s.usage.model_used ? s.usage : { model: s.model, effort: s.effort }))); tr.appendChild(roleTd);
+        tr.appendChild(el('td', 'goal', s.goal));
         tr.appendChild(el('td', 'mono', s.paths.join(' '))); tr.appendChild(el('td', 'mono', s.depends_on.join(', ') || '—'));
         const td = el('td'); td.appendChild(chip(s.status));
         if (s.detail) td.appendChild(el('div', 'hint', s.detail));
@@ -504,6 +559,7 @@
         tb.appendChild(tr);
       });
       $('planActions').hidden = st !== 'proposed';
+      $('maxNote').hidden = !plan.steps.some(s => s.profile === 'max');
     }
     const review = st === 'review' || st === 'merged';
     $('pipeReview').hidden = !review;
@@ -535,7 +591,7 @@
   async function send() {
     const message = $('chatInput').value.trim(); if (!message) return;
     const r = await pipePost('/api/chat', { message, repo: $('repo').value.trim(), backend: $('backend').value,
-      parallel: parseInt($('parallel').value, 10) || 0, max_iterations: parseInt($('iters').value, 10) || 0 });
+      parallel: parseInt($('parallel').value, 10) || 0, max_iterations: parseInt($('iters').value, 10) || 0, ...runSettings() });
     if (r) $('chatInput').value = '';
   }
   $('chatSend').addEventListener('click', send);
@@ -589,6 +645,7 @@
     await setLang(fragPref('lang') || pref('lang') || 'es');
     try {
       statusData = await api('/api/status');
+      catalog = statusData.models || catalog;
       brand(statusData.brand);
       const saved = pref('repo'), recent = statusData.recent_repos || [];
       $('repo').value = saved && recent.includes(saved) ? saved : (recent[0] || '');

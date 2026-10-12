@@ -60,6 +60,19 @@ third-party dependencies.
   library after the proposals. Limits unchanged or new: names by the same regex, presets
   only, validated paths, protected paths for every role, at most 12 roles per project; UI
   changes are confirmed in the fingerprint, manual edits in the repository still ask.
+- **Model and effort.** `uno_orchestra/models.json` is the only list of models, effort levels
+  and simple-mode profiles (verified against Claude Code 2.1.296: `--model`, `--effort
+  low|medium|high|xhigh|max`; and against the account's login: fable, opus, sonnet, haiku).
+  Each role carries its own `model` and `effort`; the planner's come from `uno config`
+  (`planner_model`, `planner_effort`). Simple mode offers three profiles per role
+  (⚡ Fast = haiku/medium, ⚖️ Balanced = sonnet/high, 🧠 Max = fable/max; defaults: planner
+  and security-analyst Max, architect and developer Balanced, tester Fast); Advanced sets
+  the exact pair and can override it for one run (the role file is untouched). A note next
+  to Approve says when the plan uses Max profiles. Every `start` event and every result
+  records the model and effort requested, the model the CLI reported, the turns and the
+  seconds. A model the CLI rejects is a clear error naming the alternatives, never a silent
+  switch. Server-side, model and effort are an enum validated against the allowlist and
+  passed to the CLI as separate arguments.
 - `/api/status` reports `brand`, `configured` (recent repositories with `.uno/`) and
   `version`; `/api/roles` reports the branch, whether it is `main`/`master` and the preflight
   result, so the page needs one call per project.

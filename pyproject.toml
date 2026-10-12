@@ -28,5 +28,6 @@ uno = "uno_orchestra.cli:main"
 include = ["uno_orchestra*"]
 
 [tool.setuptools.package-data]
+"uno_orchestra" = ["models.json"]
 "uno_orchestra.ui" = ["*.html", "*.js", "*.css", "i18n/*.json"]
 "uno_orchestra.dashboard" = ["*.html"]

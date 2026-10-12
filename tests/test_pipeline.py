@@ -720,3 +720,130 @@ def test_init_adds_a_new_role_and_one_from_the_library(tmp_path):
     assert roles["ops"].preset == "readonly" and roles["ops"].paths == ["ci/**", ".github/**"] and roles["ops"].instructions == "Keeps CI green."
     assert roles["docs-writer"].paths == ["docs/**"] and roles["dev-2"].instructions == roles["developer"].instructions
     assert roles_mod.trusted(repo, state_dir)
+
+
+# --- phase 5: model and effort per role, per-run override, usage recorded ------------------
+
+def test_model_and_effort_only_from_the_allowlist(ui, repo, tmp_path):
+    from uno_orchestra import models
+    from uno_orchestra.worker import Task
+    assert models.MODELS == ["fable", "opus", "sonnet", "haiku"] and models.EFFORTS == ["low", "medium", "high", "xhigh", "max"]
+    assert models.default_for("security-analyst") == ("fable", "max") and models.default_for("tester") == ("haiku", "medium")
+    assert models.default_for("developer") == models.default_for("anything-else") == ("sonnet", "high")
+    for bad in ({"model": "gpt-4"}, {"model": "sonnet; rm -rf /"}, {"effort": "ultra"}, {"model": "--help"}, {"effort": ""}):
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            roles_mod.Role("a", "d", "i", "edit", ["**"], **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            Task("a", "p", ["**"], **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            pipeline.planner_command("hi", "sys", **bad)
+        with pytest.raises(ValueError, match="unknown (model|effort)"):
+            pipeline.check_overrides({"developer": bad}, roles_mod.load_roles(repo))
+    # Each value is its own argv element, right after its flag: nothing is joined into a string.
+    cmd = Worker(Task("a", "p", ["**"], model="opus", effort="xhigh"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"),
+                 "claude", 10, tmp_path).command(env={})
+    assert cmd[cmd.index("--model") + 1] == "opus" and cmd[cmd.index("--effort") + 1] == "xhigh"
+    assert all(isinstance(a, str) and " " not in a for a in (cmd[cmd.index("--model") + 1], cmd[cmd.index("--effort") + 1]))
+    pc = pipeline.planner_command("hi", "sys", model="haiku", effort="low")
+    assert pc[pc.index("--model") + 1] == "haiku" and pc[pc.index("--effort") + 1] == "low" and "--fallback-model" not in pc
+    assert pipeline.planner_command("hi", "sys")[pipeline.planner_command("hi", "sys").index("--model") + 1] == "fable"
+    # The server rejects the same things, for roles, parallel tasks, overrides and the planner.
+    r = {"name": "x", "description": "d", "instructions": "i", "preset": "edit", "paths": ["**"]}
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, model="gpt-4")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, effort="ultra")})[0] == 400
+    assert call(ui, "POST", "/api/roles", {"repo": str(repo), "role": dict(r, model="haiku", effort="low")})[0] == 200
+    _, body = call(ui, "POST", "/api/check", {"repo": str(repo), "backend": "mock", "parallel": 1,
+                                              "tasks": [{"name": "a", "prompt": "p", "paths": ["**"], "model": "gpt-4"}]})
+    assert any("unknown model" in e for e in body["errors"])
+    assert chat(ui, repo, "hi", overrides={"developer": {"model": "gpt-4"}})[0] == 400
+    assert chat(ui, repo, "hi", overrides={"nope": {"model": "haiku"}})[0] == 400
+    assert chat(ui, repo, "hi", overrides={"developer": {"model": "haiku", "tools": ["Bash"]}})[0] == 400
+    assert chat(ui, repo, "hi", planner={"effort": "ultra"})[0] == 400
+    assert chat(ui, repo, "hi", planner={"model": "sonnet", "x": 1})[0] == 400
+    assert ui.chat.state == "idle"
+    _, status = call(ui, "GET", "/api/status")
+    assert status["models"]["cli_verified"] == "2.1.296" and status["planner"] == {"model": "fable", "effort": "max"}
+
+
+def test_run_override_leaves_the_role_untouched_and_is_recorded(ui, repo):
+    before = (repo / ".uno" / "roles" / "developer.json").read_text()
+    assert json.loads(before)["model"] == "sonnet" and json.loads(before)["effort"] == "high"
+    assert chat(ui, repo, "do the thing", overrides={"developer": {"model": "haiku", "effort": "low"}},
+                planner={"model": "sonnet", "effort": "medium"})[0] == 200
+    wait_state(ui, "proposed")
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    sec = next(s for s in snap["plan"]["steps"] if s["role"] == "security-analyst")
+    assert (dev["model"], dev["effort"], dev["profile"]) == ("haiku", "low", None)      # overridden, custom pair
+    assert (sec["model"], sec["effort"], sec["profile"]) == ("fable", "max", "max")      # the role's own: Max
+    assert snap["overrides"] == {"developer": {"model": "haiku", "effort": "low"}} and snap["planner"] == {"model": "sonnet", "effort": "medium"}
+    assert call(ui, "POST", "/api/pipeline/approve", {})[0] == 200
+    wait_state(ui, "review", "idle")
+    assert (repo / ".uno" / "roles" / "developer.json").read_text() == before              # the role file did not change
+    assert roles_mod.trusted(repo, ui.state_dir)
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    assert dev["usage"]["model"] == "haiku" and dev["usage"]["effort"] == "low"
+    assert dev["usage"]["model_used"] == "mock:haiku" and dev["usage"]["turns"] >= 1 and dev["usage"]["seconds"] >= 0
+    events = [json.loads(l) for l in ui.events_path.read_text().splitlines()]
+    start = next(e for e in events if e["kind"] == "start" and e["source"] == "developer")
+    assert (start["model"], start["effort"]) == ("haiku", "low")
+    start = next(e for e in events if e["kind"] == "start" and e["source"] == "security-analyst")
+    assert (start["model"], start["effort"]) == ("fable", "max")
+    done = next(e for e in events if e["kind"] == "done" and e["source"] == "developer")
+    assert done["model_used"] == "mock:haiku" and isinstance(done["turns"], int) and isinstance(done["seconds"], float)
+    # A later session without overrides uses the saved values again.
+    call(ui, "POST", "/api/pipeline/discard", {})
+    assert chat(ui, repo, "again")[0] == 200 and wait_state(ui, "proposed") == "proposed"
+    _, snap = call(ui, "GET", "/api/pipeline")
+    dev = next(s for s in snap["plan"]["steps"] if s["role"] == "developer")
+    assert (dev["model"], dev["effort"], dev["profile"]) == ("sonnet", "high", "balanced") and snap["overrides"] == {}
+
+
+def test_parallel_run_results_record_model_effort_turns_and_seconds(ui, repo):
+    f = {"repo": str(repo), "backend": "mock", "parallel": 2,
+         "tasks": [{"name": "a", "prompt": "edit a.txt", "paths": ["a.txt"], "model": "opus", "effort": "xhigh"},
+                   {"name": "b", "prompt": "edit b.txt", "paths": ["b.txt"]}]}
+    assert call(ui, "POST", "/api/start", f)[0] == 200
+    for _ in range(300):
+        if ui.run and ui.run.get("finished"):
+            break
+        time.sleep(0.1)
+    by = {a["name"]: a["usage"] for a in ui.run["results"]["agents"]}
+    assert by["a"]["model"] == "opus" and by["a"]["effort"] == "xhigh" and by["a"]["model_used"] == "mock:opus"
+    assert by["b"]["model"] == "sonnet" and by["b"]["effort"] == "high"              # default profile for a non-role name
+    assert all(u["turns"] >= 1 and u["seconds"] is not None for u in by.values())
+
+
+def test_unavailable_model_is_a_clear_error(tmp_path):
+    """What the CLI does for a model this login cannot use (observed with 2.1.296): a result
+    message with is_error and "issue with the selected model", exit 1, and
+    "[claude-code:unrecognized_model]" on stderr. Both paths end in the same clear error."""
+    from uno_orchestra.worker import Task
+
+    class FakeStream:
+        def __init__(self, lines): self.lines = lines
+        def __aiter__(self): return self
+        async def __anext__(self):
+            if not self.lines: raise StopAsyncIteration
+            return self.lines.pop(0)
+        async def read(self): return b"[claude-code:unrecognized_model] {\"model\":\"opus\"}\n"
+
+    class FakeProc:
+        def __init__(self, lines, code): self.stdout, self.stderr, self.code = FakeStream(lines), FakeStream([]), code
+        async def wait(self): return self.code
+
+    w = Worker(Task("a", "p", ["**"], model="opus", effort="high"), tmp_path, "b", EventBus(tmp_path / "e.jsonl"), "claude", 10, tmp_path)
+    bad = (b'{"type":"system","subtype":"init","model":"claude-opus-5-5"}\n',
+           b'{"type":"result","is_error":true,"result":"There\'s an issue with the selected model (opus). It may not exist or you may not have access to it.","num_turns":1,"modelUsage":{}}\n')
+    with pytest.raises(RuntimeError, match=r"model 'opus' is not available with this login.*Choose one of \['fable', 'opus', 'sonnet', 'haiku'\]"):
+        asyncio.run(w._read_stream(FakeProc(list(bad), 1)))
+    with pytest.raises(RuntimeError, match="not available with this login"):
+        asyncio.run(w._read_stream(FakeProc([], 1)))                                  # stderr path, no result message
+    assert w.output is None                                                           # never swapped to another model
+    good = [b'{"type":"system","subtype":"init","model":"claude-opus-5-5"}\n',
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+            b'{"type":"result","is_error":false,"result":"ok","num_turns":3,"modelUsage":{"claude-opus-5-5":{}}}\n']
+    asyncio.run(w._read_stream(FakeProc(good, 0)))
+    assert w.output == "ok" and w.model_used == "claude-opus-5-5" and w.turns == 3
+    assert w.usage() == {"model": "opus", "effort": "high", "model_used": "claude-opus-5-5", "turns": 3, "seconds": None}

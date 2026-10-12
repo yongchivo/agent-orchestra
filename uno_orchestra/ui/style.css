@@ -60,6 +60,7 @@ body.branded .neutral-only, body:not(.branded) .brand-only { display: none; }
 }
 body.simple #layout { grid-template-rows: calc(50vh - 46px) calc(50vh - 46px); grid-template-areas: "chat agents" "chat review"; }
 body.simple [data-adv] { display: none !important; }
+body:not(.simple) [data-simple] { display: none !important; }
 #chatPanel { grid-area: chat; } #agentsPanel { grid-area: agents; } #reviewPanel { grid-area: review; } #advanced { grid-area: adv; }
 #advanced { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 #advanced #live, #advanced #results { grid-column: 1 / -1; }
@@ -205,3 +206,11 @@ dialog h2 .close { margin-left: auto; letter-spacing: 0; text-transform: none; }
 dialog h2 .hint { letter-spacing: 0; text-transform: none; font-weight: 400; }
 dialog label { width: 100%; } dialog .row label { width: auto; }
 #rolesOpen { padding: 5px 12px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
+
+/* --- model & effort ---------------------------------------------------------------------- */
+.hint.warn { color: var(--warn); }
+#overrides { border-collapse: collapse; font-size: 12px; }
+#overrides td { padding: 3px 8px 3px 0; vertical-align: middle; }
+#overrides td:first-child { color: var(--dim); font-family: var(--mono); }
+#overrides select { padding: 3px 6px; font-size: 12px; }
+.usage { color: var(--dim); font-size: 11px; font-family: var(--mono); }

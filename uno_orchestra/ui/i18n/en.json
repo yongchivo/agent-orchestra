@@ -155,5 +155,16 @@
   "roles.saved": "saved",
   "roles.builtin": "built-in",
   "roles.mine": "mine",
-  "roles.noproject": "Choose a project before managing its roles."
+  "roles.noproject": "Choose a project before managing its roles.",
+  "roles.profile": "power",
+  "roles.model": "model",
+  "roles.effort": "effort",
+  "profile.fast": "⚡ Fast",
+  "profile.balanced": "⚖️ Balanced",
+  "profile.max": "🧠 Max",
+  "profile.custom": "custom",
+  "chat.overrides.hint": "Model and effort for the next run only (the saved role does not change). The first row is the orchestrator.",
+  "chat.planner": "orchestrator",
+  "review.maxNote": "🧠 This plan uses Max profiles: they eat more of the subscription's limit.",
+  "usage.turns": "turns"
 }

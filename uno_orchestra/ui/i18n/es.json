@@ -155,5 +155,16 @@
   "roles.saved": "guardado",
   "roles.builtin": "base",
   "roles.mine": "mía",
-  "roles.noproject": "Elige un proyecto antes de gestionar sus roles."
+  "roles.noproject": "Elige un proyecto antes de gestionar sus roles.",
+  "roles.profile": "potencia",
+  "roles.model": "modelo",
+  "roles.effort": "esfuerzo",
+  "profile.fast": "⚡ Rápido",
+  "profile.balanced": "⚖️ Equilibrado",
+  "profile.max": "🧠 Máximo",
+  "profile.custom": "personalizado",
+  "chat.overrides.hint": "Modelo y esfuerzo solo para la próxima ejecución (el rol guardado no cambia). La primera fila es el orquestador.",
+  "chat.planner": "orquestador",
+  "review.maxNote": "🧠 Este plan usa perfiles Máximo: consumen más del límite de la suscripción.",
+  "usage.turns": "turnos"
 }
