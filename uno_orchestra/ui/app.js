@@ -468,7 +468,7 @@
   }
   function renderRoles() {
     const sel = $('roleList'); const current = sel.value; clear(sel);
-    sel.appendChild(el('option', '', '(new)')).value = '';
+    sel.appendChild(el('option', '', t('roles.newOption'))).value = '';
     (rolesData.roles || []).forEach(r => { const o = el('option', '', `${r.name} · ${r.preset}`); o.value = r.name; sel.appendChild(o); });
     if ([...sel.options].some(o => o.value === current)) sel.value = current;
     const lib = $('libList'); const curLib = lib.value; clear(lib);
@@ -481,12 +481,12 @@
     const untrusted = rolesData.trusted === false && !rolesData.error;
     $('rolesTrust').hidden = !untrusted;
     if (untrusted) setList($('rolesPreview'), (rolesData.roles || []).map(r =>
-      `${r.name} · ${r.preset} · ${r.output} · paths ${r.paths.join(' ')} — ${r.description} — instructions: ${r.instructions}`)
-      .concat(rolesData.project_context ? [`project context: ${rolesData.project_context}`] : [])
-      .concat((rolesData.references || []).map(r => `referenced document (hashed with the roles, protected from the agents): ${r.path} · ${r.size} characters`)));
-    $('rolesState').textContent = (untrusted ? 'NOT CONFIRMED · ' : '') + `${(rolesData.roles || []).length} roles` +
-      ((rolesData.uncommitted || []).length ? ` · uncommitted: ${rolesData.uncommitted.join(', ')}` : '') +
-      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ` · context truncated: ${n} characters of ${doc} omitted (agents can Read the file)`).join('');
+      `${r.name} · ${r.preset} · ${r.output} · ${t('roles.preview.paths')} ${r.paths.join(' ')} — ${r.description} — ${t('roles.preview.instructions')} ${r.instructions}`)
+      .concat(rolesData.project_context ? [`${t('roles.preview.context')} ${rolesData.project_context}`] : [])
+      .concat((rolesData.references || []).map(r => t('roles.preview.reference', { path: r.path, n: r.size }))));
+    $('rolesState').textContent = (untrusted ? t('roles.state.unconfirmed') + ' · ' : '') + t('roles.state.count', { n: (rolesData.roles || []).length }) +
+      ((rolesData.uncommitted || []).length ? ` · ${t('roles.state.uncommitted', { files: rolesData.uncommitted.join(', ') })}` : '') +
+      Object.entries(rolesData.truncated || {}).map(([doc, n]) => ' · ' + t('roles.state.truncated', { n, doc })).join('');
     $('rolesOpen').disabled = !$('repo').value.trim();
     renderOverrides(); renderSpecialChips();
     renderProjectState();
@@ -574,7 +574,7 @@
         tr.appendChild(el('td', 'mono', s.paths.join(' '))); tr.appendChild(el('td', 'mono', s.depends_on.join(', ') || '—'));
         const td = el('td'); td.appendChild(chip(s.status));
         if (s.detail) td.appendChild(el('div', 'hint', s.detail));
-        if (s.findings && s.findings.length) td.appendChild(el('div', 'hint', `${s.findings.length} findings`));
+        if (s.findings && s.findings.length) td.appendChild(el('div', 'hint', t('review.findings.count', { n: s.findings.length })));
         tr.appendChild(td);
         tr.appendChild(el('td', '', s.iteration ? String(s.iteration) : '—'));
         tb.appendChild(tr);
@@ -886,6 +886,7 @@
     setConn(conn.className.includes('live') ? 'live' : conn.className.includes('bad') ? 'offline' : 'idle');
     if (lastResults) renderResults(lastResults);
     if (noticeKey) notice(noticeKey);
+    renderRoles();
     renderStudio();
   }
 

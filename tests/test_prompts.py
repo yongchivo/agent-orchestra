@@ -148,6 +148,7 @@ def test_output_schema_is_validated_field_by_field():
     out = prompts.check_output(dict(good_output(), suggested_roles=["developer", "../x", "Bash Runner", "a" * 40, "ok-1"]), "create")
     assert out["suggested_roles"] == ["developer", "ok-1"]
     assert "review" in prompts.schema_for("review")["required"] and "review" not in prompts.PROMPT_SCHEMA["required"]
+    assert "review" not in prompts.schema_for("fix")["properties"] and "review" in prompts.schema_for("review")["properties"]
 
 
 def test_inputs_are_capped_enumerated_and_redacted():
@@ -459,7 +460,7 @@ def test_get_and_head_never_touch_studio_state(ui):
 
 def test_version_and_changelog():
     from uno_orchestra import __version__
-    assert __version__ == "0.3.0"
-    assert 'version = "0.3.0"' in (ROOT / "pyproject.toml").read_text()
-    assert "## [0.3.0]" in (ROOT / "CHANGELOG.md").read_text()
+    assert __version__ == "0.3.0"                                                  # phase 6
+    assert f'version = "{__version__}"' in (ROOT / "pyproject.toml").read_text()
+    assert f"## [{__version__}]" in (ROOT / "CHANGELOG.md").read_text()
     assert "## Prompt Studio" in (ROOT / "README.md").read_text()

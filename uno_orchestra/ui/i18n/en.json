@@ -258,5 +258,15 @@
   "lint.no_stop": "no stop points",
   "lint.placeholder": "placeholder left in",
   "lint.too_long": "too long",
-  "lint.secret": "looks like it contains a secret"
+  "lint.secret": "looks like it contains a secret",
+  "roles.newOption": "(new)",
+  "roles.preview.paths": "paths",
+  "roles.preview.instructions": "instructions:",
+  "roles.preview.context": "project context:",
+  "roles.preview.reference": "referenced document (hashed with the roles, protected from the agents): {path} · {n} characters",
+  "roles.state.unconfirmed": "NOT CONFIRMED",
+  "roles.state.count": "{n} roles",
+  "roles.state.uncommitted": "uncommitted: {files}",
+  "roles.state.truncated": "context truncated: {n} characters of {doc} omitted (agents can Read the file)",
+  "review.findings.count": "{n} findings"
 }

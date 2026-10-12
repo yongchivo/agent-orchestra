@@ -258,5 +258,15 @@
   "lint.no_stop": "no hay puntos de parada",
   "lint.placeholder": "marcador sin sustituir",
   "lint.too_long": "demasiado largo",
-  "lint.secret": "parece contener un secreto"
+  "lint.secret": "parece contener un secreto",
+  "roles.newOption": "(nuevo)",
+  "roles.preview.paths": "rutas",
+  "roles.preview.instructions": "instrucciones:",
+  "roles.preview.context": "contexto del proyecto:",
+  "roles.preview.reference": "documento referenciado (con hash junto a los roles, protegido frente a los agentes): {path} · {n} caracteres",
+  "roles.state.unconfirmed": "SIN CONFIRMAR",
+  "roles.state.count": "{n} roles",
+  "roles.state.uncommitted": "sin commit: {files}",
+  "roles.state.truncated": "contexto recortado: {n} caracteres de {doc} omitidos (los agentes pueden leer el archivo)",
+  "review.findings.count": "{n} hallazgos"
 }
